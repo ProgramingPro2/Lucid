@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Rate this continuation</h1>
+<p class="muted">
+  Rater: <strong>{{ rater }}</strong> &middot;
+  {{ counts['ratings'] }} ratings on {{ counts['items'] }} items
+</p>
+
+{% if item %}
+<form method="post" action="/rate" id="rateForm">
+  <div class="card">
+    <div class="prompt">Prompt: {{ item["prompt"] or "(no prompt)" }}</div>
+    <div class="continuation">{{ item["text"] }}</div>
+  </div>
+
+  <p>How coherent, relevant and well-written is the continuation?</p>
+  <div class="scale">
+    {% for n in [1, 2, 3, 4, 5] %}
+    <label><input type="radio" name="score" value="{{ n }}" required />{{ n }}</label>
+    {% endfor %}
+  </div>
+  <p class="muted">1 = gibberish, 5 = excellent</p>
+
+  <input type="hidden" name="rater" value="{{ rater }}" />
+  <input type="hidden" name="item_id" value="{{ item['id'] }}" />
+  <input type="hidden" name="seconds_spent" id="seconds_spent" value="0" />
+  <button type="submit">Submit and next</button>
+</form>
+<script>
+  const start = Date.now();
+  document.getElementById("rateForm").addEventListener("submit", () => {
+    document.getElementById("seconds_spent").value =
+      ((Date.now() - start) / 1000).toFixed(1);
+  });
+</script>
+{% else %}
+<div class="card">
+  <p>No items left to rate right now. Check back after the next generation run.</p>
+</div>
+{% endif %}
+{% endblock %}

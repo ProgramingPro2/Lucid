@@ -1,0 +1,27 @@
+# Core ML
+torch>=2.4
+numpy>=1.26
+
+# Concept codec (frozen sentence encoder; decoder via retrieval or SONAR)
+sentence-transformers>=3.0
+transformers>=4.44
+
+# Rating web app
+fastapi>=0.115
+uvicorn[standard]>=0.30
+jinja2>=3.1
+python-multipart>=0.0.9
+
+# Utilities
+requests>=2.32
+tqdm>=4.66
+
+# Optional: OpenAI-backed LLM judge (a heuristic judge is used if unavailable)
+openai>=1.40
+
+# Tests
+pytest>=8.0
+
+# NOTE: Generative SONAR decoding is optional and installed separately.
+# See requirements-sonar.txt and docs/LIMITATIONS.md. SONAR (fairseq2) may
+# not support the newest Python versions; the retrieval decoder works everywhere.

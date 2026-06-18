@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.env
+
+# Generated artifacts
+artifacts/
+*.npz
+*.npy
+*.pt
+*.sqlite
+*.sqlite3
+*.db
+
+# Allow the tiny sample corpus to be tracked
+!data/sample_corpus.txt

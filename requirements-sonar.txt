@@ -1,0 +1,6 @@
+# Optional: generative concept decoding via Meta's SONAR.
+# Installs fairseq2 + sonar-space. These have stricter Python/OS support than
+# the core requirements. If install fails on your Python version, the project
+# still runs end-to-end using the retrieval decoder (see src/conceptpoc/codec).
+sonar-space>=0.2
+fairseq2>=0.2
