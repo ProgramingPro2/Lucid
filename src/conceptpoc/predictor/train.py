@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader, random_split
 
 from ..config import PredictorConfig, TrainConfig
 from ..data.dataset import ConceptSequenceDataset, collate_sequences
+from ..progress import iter_bar, log_epoch
 from .model import ConceptPredictor, predictor_loss
 
 
@@ -30,6 +31,7 @@ def train_predictor(
     train_cfg: TrainConfig,
     device: str = "auto",
     model: ConceptPredictor | None = None,
+    progress: bool = True,
 ) -> tuple[ConceptPredictor, TrainHistory]:
     torch.manual_seed(train_cfg.seed)
     dev = _device(device)
@@ -65,10 +67,17 @@ def train_predictor(
     )
 
     history = TrainHistory()
-    for _ in range(train_cfg.epochs):
+    for epoch in range(train_cfg.epochs):
         model.train()
         epoch_loss = 0.0
-        for context, mask, target in train_dl:
+        batch_iter = iter_bar(
+            train_dl,
+            desc=f"epoch {epoch + 1}/{train_cfg.epochs} train",
+            total=len(train_dl),
+            enabled=progress,
+            unit="batch",
+        )
+        for context, mask, target in batch_iter:
             context, mask, target = context.to(dev), mask.to(dev), target.to(dev)
             opt.zero_grad()
             pred = model(context, mask)
@@ -82,18 +91,39 @@ def train_predictor(
             epoch_loss += loss.total.item()
         history.train_loss.append(epoch_loss / max(1, len(train_dl)))
 
-        val_loss, val_cos = _evaluate(model, val_dl, predictor_cfg, dev)
+        val_loss, val_cos = _evaluate(
+            model, val_dl, predictor_cfg, dev, progress=progress
+        )
         history.val_loss.append(val_loss)
         history.val_cosine.append(val_cos)
+        log_epoch(
+            "train",
+            epoch + 1,
+            train_cfg.epochs,
+            {
+                "train_loss": history.train_loss[-1],
+                "val_loss": val_loss,
+                "val_cosine": val_cos,
+            },
+            enabled=progress,
+        )
 
     return model, history
 
 
 @torch.no_grad()
-def _evaluate(model, dl, predictor_cfg, dev) -> tuple[float, float]:
+def _evaluate(
+    model, dl, predictor_cfg, dev, *, progress: bool = True
+) -> tuple[float, float]:
     model.eval()
     total, cos, n = 0.0, 0.0, 0
-    for context, mask, target in dl:
+    for context, mask, target in iter_bar(
+        dl,
+        desc="val",
+        total=len(dl),
+        enabled=progress and len(dl) > 1,
+        unit="batch",
+    ):
         context, mask, target = context.to(dev), mask.to(dev), target.to(dev)
         pred = model(context, mask)
         loss = predictor_loss(

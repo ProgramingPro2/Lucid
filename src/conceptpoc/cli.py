@@ -31,6 +31,7 @@ from .persistence import (
     save_predictor,
     write_json,
 )
+from .progress import log_stage
 
 
 def _paths(cfg: Config) -> dict[str, Path]:
@@ -77,7 +78,7 @@ def _codec_and_predictor(cfg: Config, fit_texts: list[str] | None):
     return codec, load_predictor(_paths(cfg)["predictor"])
 
 
-def cmd_prepare(cfg: Config) -> None:
+def cmd_prepare(cfg: Config, *, progress: bool = True) -> None:
     cfg.ensure_dirs()
     docs = load_documents(
         cfg.data.corpus_path, cfg.data.min_sentence_chars, cfg.data.max_sentence_chars
@@ -85,7 +86,7 @@ def cmd_prepare(cfg: Config) -> None:
     codec = build_codec(cfg.codec)
     cache = EmbeddingCache(cfg.artifacts_dir / "cache")
     codec_id = f"{cfg.codec.kind}:{cfg.codec.model_name}"
-    corpus = cache.build(docs, codec, codec_id)
+    corpus = cache.build(docs, codec, codec_id, progress=progress)
     if hasattr(codec, "fit_decoder"):
         bank = corpus.sentences[: cfg.codec.decoder_bank_size]
         bank_vecs = corpus.vectors[: cfg.codec.decoder_bank_size]
@@ -95,7 +96,7 @@ def cmd_prepare(cfg: Config) -> None:
     )
 
 
-def cmd_train(cfg: Config) -> None:
+def cmd_train(cfg: Config, *, progress: bool = True) -> None:
     cfg.ensure_dirs()
     docs = load_documents(
         cfg.data.corpus_path, cfg.data.min_sentence_chars, cfg.data.max_sentence_chars
@@ -103,12 +104,14 @@ def cmd_train(cfg: Config) -> None:
     codec = build_codec(cfg.codec)
     cache = EmbeddingCache(cfg.artifacts_dir / "cache")
     codec_id = f"{cfg.codec.kind}:{cfg.codec.model_name}"
-    corpus = cache.build(docs, codec, codec_id)
+    corpus = cache.build(docs, codec, codec_id, progress=progress)
     dataset = ConceptSequenceDataset(corpus, context_len=cfg.data.context_len)
 
     from .predictor.train import train_predictor
 
-    model, history = train_predictor(dataset, cfg.predictor, cfg.train)
+    model, history = train_predictor(
+        dataset, cfg.predictor, cfg.train, progress=progress
+    )
     save_predictor(_paths(cfg)["predictor"], model)
     print(
         f"trained predictor ({model.num_parameters():,} params); "
@@ -116,14 +119,16 @@ def cmd_train(cfg: Config) -> None:
     )
 
 
-def cmd_train_joint(cfg: Config) -> None:
+def cmd_train_joint(cfg: Config, *, progress: bool = True) -> None:
     cfg.ensure_dirs()
     docs = load_documents(
         cfg.data.corpus_path, cfg.data.min_sentence_chars, cfg.data.max_sentence_chars
     )
     from .jepa.train_joint import train_joint
 
-    model, _, history = train_joint(docs, cfg.jepa, cfg.predictor)
+    model, _, history = train_joint(
+        docs, cfg.jepa, cfg.predictor, progress=progress
+    )
     ckpt = cfg.artifacts_dir / "jepa" / "joint.pt"
     save_joint(ckpt, model, cfg.jepa.tokenizer)
     metrics = {
@@ -145,18 +150,30 @@ def cmd_train_joint(cfg: Config) -> None:
         )
 
 
-def cmd_eval(cfg: Config) -> None:
+def cmd_eval(cfg: Config, *, progress: bool = True) -> None:
     from .eval.metrics import next_vector_accuracy, reconstruction_quality
 
     docs = load_documents(cfg.data.corpus_path)
     codec, model = _codec_and_predictor(cfg, [s for d in docs for s in d.sentences])
     cache = EmbeddingCache(cfg.artifacts_dir / "cache")
-    corpus = cache.build(docs, codec, f"{cfg.codec.kind}:{cfg.codec.model_name}")
+    corpus = cache.build(
+        docs, codec, f"{cfg.codec.kind}:{cfg.codec.model_name}", progress=progress
+    )
     dataset = ConceptSequenceDataset(corpus, context_len=cfg.data.context_len)
 
     sample = corpus.sentences[: min(200, len(corpus.sentences))]
-    recon = reconstruction_quality(codec, sample)
-    acc = next_vector_accuracy(model, dataset, bank_vectors=corpus.vectors)
+    log_stage(
+        f"eval: reconstruction ({len(sample)} items)",
+        enabled=progress,
+    )
+    recon = reconstruction_quality(codec, sample, progress=progress)
+    log_stage(
+        f"eval: next-vector accuracy (up to 512 items)",
+        enabled=progress,
+    )
+    acc = next_vector_accuracy(
+        model, dataset, bank_vectors=corpus.vectors, progress=progress
+    )
 
     metrics = {
         "reconstruction_cosine": recon.mean_cosine,
@@ -184,7 +201,7 @@ def cmd_generate(cfg: Config, prompt: str, steps: int) -> None:
         print("  -", line)
 
 
-def cmd_improve(cfg: Config) -> None:
+def cmd_improve(cfg: Config, *, progress: bool = True) -> None:
     from .loop.self_improve import run_self_improvement
     from .reward.judge import build_judge
 
@@ -194,7 +211,14 @@ def cmd_improve(cfg: Config) -> None:
     prompts = [codec.encode(d.sentences[:2]) for d in docs[:8] if len(d.sentences) >= 2]
     judge = build_judge()
     model, report = run_self_improvement(
-        model, codec, prompts, judge, cfg.loop, cfg.predictor, cfg.train
+        model,
+        codec,
+        prompts,
+        judge,
+        cfg.loop,
+        cfg.predictor,
+        cfg.train,
+        progress=progress,
     )
     if not _is_jepa(cfg):
         save_predictor(_paths(cfg)["predictor"], model)
@@ -204,7 +228,19 @@ def cmd_improve(cfg: Config) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--config", default=None, help="path to JSON config override")
+    # default=SUPPRESS so a subparser parsing no --config does not clobber a value
+    # already set by the top-level parser when --config precedes the subcommand.
+    common.add_argument(
+        "--config",
+        default=argparse.SUPPRESS,
+        help="path to JSON config override",
+    )
+    common.add_argument(
+        "--quiet",
+        "-q",
+        action="store_true",
+        help="suppress progress bars and per-epoch logging",
+    )
 
     p = argparse.ArgumentParser(prog="conceptpoc", parents=[common])
     sub = p.add_subparsers(dest="command", required=True)
@@ -221,19 +257,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    cfg = Config.load(args.config)
+    cfg = Config.load(getattr(args, "config", None))
+    progress = not getattr(args, "quiet", False)
     if args.command == "prepare":
-        cmd_prepare(cfg)
+        cmd_prepare(cfg, progress=progress)
     elif args.command == "train":
-        cmd_train(cfg)
+        cmd_train(cfg, progress=progress)
     elif args.command == "train-joint":
-        cmd_train_joint(cfg)
+        cmd_train_joint(cfg, progress=progress)
     elif args.command == "eval":
-        cmd_eval(cfg)
+        cmd_eval(cfg, progress=progress)
     elif args.command == "generate":
         cmd_generate(cfg, args.prompt, args.steps)
     elif args.command == "improve":
-        cmd_improve(cfg)
+        cmd_improve(cfg, progress=progress)
 
 
 if __name__ == "__main__":

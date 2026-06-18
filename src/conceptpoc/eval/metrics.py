@@ -17,6 +17,9 @@ import torch
 from ..codec.base import ConceptCodec
 from ..data.dataset import ConceptSequenceDataset, collate_sequences
 from ..predictor.model import ConceptPredictor
+from ..progress import iter_bar
+
+_EVAL_BATCH = 64
 
 
 @dataclass
@@ -25,12 +28,29 @@ class ReconReport:
     n: int
 
 
-def reconstruction_quality(codec: ConceptCodec, texts: list[str]) -> ReconReport:
-    original = codec.encode(texts)
-    decoded = codec.decode(original)
-    re_encoded = codec.encode(decoded)
-    cos = np.sum(original * re_encoded, axis=1)
-    return ReconReport(mean_cosine=float(np.mean(cos)), n=len(texts))
+def reconstruction_quality(
+    codec: ConceptCodec,
+    texts: list[str],
+    progress: bool = True,
+    batch_size: int = _EVAL_BATCH,
+) -> ReconReport:
+    if not texts:
+        return ReconReport(mean_cosine=float("nan"), n=0)
+
+    cos_values: list[float] = []
+    chunks = [texts[i : i + batch_size] for i in range(0, len(texts), batch_size)]
+    for batch in iter_bar(
+        chunks,
+        desc="eval: reconstruction",
+        total=len(chunks),
+        enabled=progress,
+        unit="batch",
+    ):
+        original = codec.encode(batch)
+        decoded = codec.decode(original)
+        re_encoded = codec.encode(decoded)
+        cos_values.extend(np.sum(original * re_encoded, axis=1).tolist())
+    return ReconReport(mean_cosine=float(np.mean(cos_values)), n=len(texts))
 
 
 @dataclass
@@ -47,6 +67,7 @@ def next_vector_accuracy(
     bank_vectors: np.ndarray | None = None,
     device: str = "cpu",
     max_items: int = 512,
+    progress: bool = True,
 ) -> PredictReport:
     from torch.utils.data import DataLoader, Subset
 
@@ -61,7 +82,13 @@ def next_vector_accuracy(
         else None
     )
     cos_sum, correct, count = 0.0, 0, 0
-    for context, mask, target in dl:
+    for context, mask, target in iter_bar(
+        dl,
+        desc="eval: next-vector",
+        total=len(dl),
+        enabled=progress,
+        unit="batch",
+    ):
         context, mask, target = context.to(device), mask.to(device), target.to(device)
         pred = model(context, mask)
         cos_sum += torch.cosine_similarity(pred, target, dim=-1).sum().item()

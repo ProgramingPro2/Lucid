@@ -14,7 +14,10 @@ from pathlib import Path
 import numpy as np
 
 from ..codec.base import ConceptCodec
+from ..progress import iter_bar, log_stage
 from .corpus import Document
+
+_ENCODE_BATCH = 256
 
 
 @dataclass
@@ -51,11 +54,16 @@ class EmbeddingCache:
         return self.cache_dir / f"corpus_{key}.npz"
 
     def build(
-        self, docs: list[Document], codec: ConceptCodec, codec_id: str
+        self,
+        docs: list[Document],
+        codec: ConceptCodec,
+        codec_id: str,
+        progress: bool = True,
     ) -> CachedCorpus:
         key = self._key(docs, codec_id)
         path = self._path(key)
         if path.exists():
+            log_stage("loaded cached embeddings", enabled=progress)
             return self._load(path)
 
         sentences: list[str] = []
@@ -64,7 +72,27 @@ class EmbeddingCache:
             sentences.extend(doc.sentences)
             offsets.append(len(sentences))
 
-        vectors = codec.encode(sentences)
+        log_stage(
+            f"encoding {len(sentences):,} sentences...",
+            enabled=progress,
+        )
+        chunks = [
+            sentences[i : i + _ENCODE_BATCH]
+            for i in range(0, len(sentences), _ENCODE_BATCH)
+        ]
+        encoded = [
+            codec.encode(batch)
+            for batch in iter_bar(
+                chunks,
+                desc="encoding",
+                total=len(chunks),
+                enabled=progress,
+                unit="batch",
+            )
+        ]
+        vectors = np.concatenate(encoded, axis=0) if encoded else np.zeros(
+            (0, codec.dim), dtype=np.float32
+        )
         cached = CachedCorpus(
             vectors=vectors,
             sentences=sentences,

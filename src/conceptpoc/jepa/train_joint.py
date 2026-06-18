@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader
 
 from ..config import JepaConfig, PredictorConfig
 from ..data.corpus import Document
+from ..progress import iter_bar, log_epoch, log_stage
 from .dataset import JepaWindowDataset, make_collate
 from .joint_model import JointJepa
 from .tokenizer import Tokenizer
@@ -66,6 +67,7 @@ def train_joint(
     predictor_cfg: PredictorConfig,
     device: str = "auto",
     tokenizer: Tokenizer | None = None,
+    progress: bool = True,
 ) -> tuple[JointJepa, Tokenizer, JointHistory]:
     torch.manual_seed(cfg.seed)
     dev = _device(device)
@@ -94,7 +96,14 @@ def train_joint(
         model.train()
         agg = {"total": 0.0, "recon": 0.0, "pred": 0.0, "acc": 0.0, "std": 0.0}
         n = 0
-        for sent_ids, sent_pad, sent_valid in loader:
+        batch_iter = iter_bar(
+            loader,
+            desc=f"epoch {epoch + 1}/{cfg.epochs}",
+            total=len(loader),
+            enabled=progress,
+            unit="batch",
+        )
+        for sent_ids, sent_pad, sent_valid in batch_iter:
             sent_ids = sent_ids.to(dev)
             sent_pad = sent_pad.to(dev)
             sent_valid = sent_valid.to(dev)
@@ -119,6 +128,26 @@ def train_joint(
         history.recon_acc.append(agg["acc"] / n)
         history.std_z.append(agg["std"] / n)
         history.alpha.append(alpha)
+
+        log_epoch(
+            "train-joint",
+            epoch + 1,
+            cfg.epochs,
+            {
+                "alpha": alpha,
+                "recon_acc": history.recon_acc[-1],
+                "std_z": history.std_z[-1],
+                "total": history.total[-1],
+            },
+            enabled=progress,
+        )
+        if progress and history.std_z[-1] < cfg.collapse_std_threshold:
+            log_stage(
+                f"WARNING: std_z={history.std_z[-1]:.3f} below collapse threshold "
+                f"({cfg.collapse_std_threshold}); tune var_weight, alpha_max, or "
+                "recon_warmup_epochs.",
+                enabled=True,
+            )
 
     history.collapsed = bool(history.std_z[-1] < cfg.collapse_std_threshold)
     return model, tokenizer, history

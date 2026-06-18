@@ -15,5 +15,7 @@ artifacts/
 *.sqlite3
 *.db
 
-# Allow the tiny sample corpus to be tracked
+# Downloaded / generated corpora (keep only the tiny tracked sample)
+data/raw/
+data/books_corpus.txt
 !data/sample_corpus.txt

@@ -61,5 +61,7 @@ def test_reward_model_learns_ordering():
         rejected = _item("p", 0.0)
         rejected.vectors[:, 0] -= 1.0
         pairs.append(PreferencePair("p", chosen, rejected))
-    model, hist = train_reward_model(pairs, concept_dim=8, epochs=60, lr=5e-3)
+    model, hist = train_reward_model(
+        pairs, concept_dim=8, epochs=60, lr=5e-3, progress=False
+    )
     assert hist.accuracy[-1] > 0.8
