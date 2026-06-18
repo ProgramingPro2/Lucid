@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Concept POC Rating</h1>
+<p class="muted">Help train the model by rating how good each continuation is.</p>
+<form method="get" action="/" class="card">
+  <label for="rater">Your name or nickname</label>
+  <input type="text" id="rater" name="rater" placeholder="e.g. alex" required />
+  <p class="muted" style="margin:0.75rem 0;">
+    Your name only attributes your ratings so quality control can spot patterns.
+  </p>
+  <button type="submit">Start rating</button>
+</form>
+{% endblock %}

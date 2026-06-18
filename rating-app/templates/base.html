@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Concept POC Rating</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      max-width: 720px; margin: 0 auto; padding: 2rem 1.25rem; line-height: 1.5;
+    }
+    h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
+    .muted { opacity: 0.65; font-size: 0.9rem; }
+    .card {
+      border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+      border-radius: 12px; padding: 1.25rem; margin: 1rem 0;
+    }
+    .prompt { font-weight: 600; }
+    .continuation { white-space: pre-wrap; margin-top: 0.75rem; }
+    .scale { display: flex; gap: 0.5rem; margin: 1rem 0; flex-wrap: wrap; }
+    .scale label {
+      border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+      border-radius: 8px; padding: 0.5rem 0.9rem; cursor: pointer;
+    }
+    .scale input { margin-right: 0.35rem; }
+    button {
+      font-size: 1rem; padding: 0.6rem 1.2rem; border-radius: 8px;
+      border: none; background: #2563eb; color: white; cursor: pointer;
+    }
+    input[type=text] {
+      padding: 0.55rem 0.7rem; border-radius: 8px;
+      border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+      width: 100%; box-sizing: border-box;
+    }
+  </style>
+</head>
+<body>
+  {% block content %}{% endblock %}
+</body>
+</html>
