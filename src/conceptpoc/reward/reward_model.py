@@ -16,6 +16,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from .preference import PreferencePair
+from ..progress import iter_bar, log_epoch
 
 
 class RewardModel(nn.Module):
@@ -70,6 +71,7 @@ def train_reward_model(
     lr: float = 1e-3,
     device: str = "cpu",
     seed: int = 0,
+    progress: bool = True,
 ) -> tuple[RewardModel, RewardTrainHistory]:
     if not pairs:
         raise ValueError("no preference pairs to train on")
@@ -83,7 +85,13 @@ def train_reward_model(
     rejected, r_mask = rejected.to(device), r_mask.to(device)
 
     history = RewardTrainHistory()
-    for _ in range(epochs):
+    for epoch in iter_bar(
+        range(epochs),
+        desc="reward model",
+        total=epochs,
+        enabled=progress,
+        unit="epoch",
+    ):
         model.train()
         opt.zero_grad()
         rc = model(chosen, c_mask)
@@ -92,5 +100,13 @@ def train_reward_model(
         loss.backward()
         opt.step()
         history.loss.append(float(loss.item()))
-        history.accuracy.append(float((rc > rr).float().mean().item()))
+        acc = float((rc > rr).float().mean().item())
+        history.accuracy.append(acc)
+        log_epoch(
+            "reward",
+            epoch + 1,
+            epochs,
+            {"loss": float(loss.item()), "accuracy": acc},
+            enabled=progress,
+        )
     return model, history

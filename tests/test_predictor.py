@@ -55,5 +55,5 @@ def test_training_reduces_validation_loss():
     ds = ConceptSequenceDataset(corpus, context_len=6)
     cfg = _tiny_cfg()
     train_cfg = TrainConfig(batch_size=16, lr=1e-3, epochs=8, val_fraction=0.2)
-    _, history = train_predictor(ds, cfg, train_cfg, device="cpu")
+    _, history = train_predictor(ds, cfg, train_cfg, device="cpu", progress=False)
     assert history.val_cosine[-1] > history.val_cosine[0]

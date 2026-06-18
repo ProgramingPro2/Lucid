@@ -22,11 +22,11 @@ def test_cache_build_and_reload(tmp_path):
     docs = load_documents(CORPUS)
     codec = HashingCodec(dim=64)
     cache = EmbeddingCache(tmp_path)
-    corpus = cache.build(docs, codec, "hashing:test")
+    corpus = cache.build(docs, codec, "hashing:test", progress=False)
     assert corpus.vectors.shape[0] == len(corpus.sentences)
     assert corpus.dim == 64
     # Second build hits the cache and returns identical content.
-    again = cache.build(docs, codec, "hashing:test")
+    again = cache.build(docs, codec, "hashing:test", progress=False)
     assert np.allclose(corpus.vectors, again.vectors)
 
 

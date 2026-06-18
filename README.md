@@ -60,6 +60,29 @@ python -m conceptpoc.cli generate --prompt "The morning light moved across the v
 python -m conceptpoc.cli improve    # run the self-improvement loop
 ```
 
+### Progress output
+
+Long-running commands show tqdm progress bars and per-epoch metric lines on stderr.
+Use `--quiet` / `-q` to suppress them (useful in scripts and CI):
+
+```bash
+python -m conceptpoc.cli --quiet train
+```
+
+Example training output:
+
+```
+encoding 36465 sentences...
+encoding: 100%|████████| 143/143
+epoch 1/40 train: 100%|████████| 512/512
+[train] epoch 1/40  train_loss=0.156  val_loss=0.148  val_cosine=0.712
+...
+trained predictor (4,123,456 params); final val cosine=0.891
+```
+
+Joint JEPA training prints `std_z` and `recon_acc` each epoch so you can watch
+for representation collapse during the run (see [docs/LIMITATIONS.md](docs/LIMITATIONS.md)).
+
 ### Train your own codec (joint JEPA)
 
 Instead of a frozen codec, train your own encoder + decoder + predictor jointly

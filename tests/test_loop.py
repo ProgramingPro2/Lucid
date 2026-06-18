@@ -28,6 +28,7 @@ def test_self_improvement_runs_end_to_end(fitted_codec, sentences):
         PredictorConfig(d_model=32, n_layers=2, n_heads=4, max_seq_len=16),
         TrainConfig(batch_size=8, epochs=1),
         device="cpu",
+        progress=False,
     )
     assert len(report.mean_reward_per_iter) == 2
     assert len(report.best_samples) == 2

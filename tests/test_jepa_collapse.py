@@ -31,7 +31,7 @@ def test_joint_run_stays_uncollapsed_and_learns():
         collapse_std_threshold=1e-3,
     )
     pcfg = PredictorConfig(d_model=48, n_layers=1, n_heads=4, max_seq_len=16)
-    _, _, hist = train_joint(docs, cfg, pcfg, device="cpu")
+    _, _, hist = train_joint(docs, cfg, pcfg, device="cpu", progress=False)
 
     # The space does not collapse and reconstruction improves over training.
     assert not hist.collapsed

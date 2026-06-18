@@ -26,6 +26,7 @@ from ..data.cache import CachedCorpus
 from ..data.dataset import ConceptSequenceDataset
 from ..predictor.model import ConceptPredictor
 from ..predictor.train import train_predictor
+from ..progress import iter_bar, log_stage
 from ..reward.judge import Judge
 from ..reward.preference import ScoredItem
 from ..generate.rollout import generate_rollout, rollout_to_text
@@ -66,15 +67,27 @@ def run_self_improvement(
     train_cfg: TrainConfig,
     device: str = "cpu",
     seed: int = 0,
+    progress: bool = True,
 ) -> tuple[ConceptPredictor, LoopReport]:
     rng = np.random.default_rng(seed)
     report = LoopReport()
 
-    for _ in range(loop_cfg.iterations):
+    for iteration in range(loop_cfg.iterations):
+        log_stage(
+            f"improve: iteration {iteration + 1}/{loop_cfg.iterations}",
+            enabled=progress,
+        )
         items: list[ScoredItem] = []
         kept_trajectories: list[np.ndarray] = []
 
-        for p_idx, seed_vecs in enumerate(prompts):
+        prompt_iter = iter_bar(
+            enumerate(prompts),
+            desc="rollouts",
+            total=len(prompts),
+            enabled=progress,
+            unit="prompt",
+        )
+        for p_idx, seed_vecs in prompt_iter:
             candidates: list[ScoredItem] = []
             for _ in range(loop_cfg.rollouts_per_prompt):
                 roll = generate_rollout(
@@ -109,6 +122,10 @@ def run_self_improvement(
         mean_reward = float(np.mean([it.reward for it in items])) if items else 0.0
         report.mean_reward_per_iter.append(mean_reward)
         report.kept_per_iter.append(len(kept_trajectories))
+        log_stage(
+            f"improve: mean_reward={mean_reward:.3f} kept={len(kept_trajectories)}",
+            enabled=progress,
+        )
 
         best = max(items, key=lambda x: x.reward)
         report.best_samples.append(best.text)
@@ -128,7 +145,12 @@ def run_self_improvement(
             )
             if len(ds) >= 2:
                 model, _ = train_predictor(
-                    ds, predictor_cfg, ft_cfg, device=device, model=model
+                    ds,
+                    predictor_cfg,
+                    ft_cfg,
+                    device=device,
+                    model=model,
+                    progress=progress,
                 )
 
     return model, report
