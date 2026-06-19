@@ -1,0 +1,35 @@
+{
+  "artifacts_dir": "artifacts/large_frozen",
+  "codec": {
+    "kind": "sentence-transformer",
+    "model_name": "sentence-transformers/all-MiniLM-L6-v2",
+    "decoder_bank_size": 50000,
+    "device": "auto"
+  },
+  "data": {
+    "corpus_path": "data/large_corpus.txt",
+    "context_len": 8
+  },
+  "predictor": {
+    "d_model": 512,
+    "n_layers": 6,
+    "n_heads": 8,
+    "max_seq_len": 64,
+    "dropout": 0.1
+  },
+  "train": {
+    "batch_size": 128,
+    "lr": 3e-4,
+    "epochs": 30,
+    "warmup_steps": 200,
+    "val_fraction": 0.1,
+    "seed": 0
+  },
+  "loop": {
+    "rollouts_per_prompt": 8,
+    "keep_fraction": 0.25,
+    "rollout_steps": 6,
+    "iterations": 3,
+    "finetune_epochs": 2
+  }
+}

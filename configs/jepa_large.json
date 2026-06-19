@@ -1,0 +1,52 @@
+{
+  "artifacts_dir": "artifacts/large_jepa",
+  "codec": {
+    "kind": "jepa",
+    "device": "auto"
+  },
+  "data": {
+    "corpus_path": "data/large_corpus.txt",
+    "context_len": 8
+  },
+  "predictor": {
+    "d_model": 512,
+    "n_layers": 6,
+    "n_heads": 8,
+    "max_seq_len": 64,
+    "dropout": 0.1
+  },
+  "jepa": {
+    "dim": 512,
+    "tokenizer": "gpt2",
+    "max_tokens": 48,
+    "enc_layers": 6,
+    "enc_heads": 8,
+    "dec_layers": 6,
+    "dec_heads": 8,
+    "d_model": 512,
+    "dropout": 0.1,
+    "recon_warmup_epochs": 8,
+    "alpha_warmup_epochs": 8,
+    "alpha_max": 1.0,
+    "ema_momentum": 0.99,
+    "var_weight": 1.0,
+    "cov_weight": 0.04,
+    "var_margin": 1.0,
+    "collapse_std_threshold": 0.1,
+    "batch_size": 16,
+    "lr": 3e-4,
+    "epochs": 30,
+    "grad_clip": 1.0,
+    "context_len": 8,
+    "val_fraction": 0.1,
+    "patience": 0,
+    "seed": 0
+  },
+  "loop": {
+    "rollouts_per_prompt": 8,
+    "keep_fraction": 0.25,
+    "rollout_steps": 6,
+    "iterations": 3,
+    "finetune_epochs": 2
+  }
+}

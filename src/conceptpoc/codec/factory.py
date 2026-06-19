@@ -38,7 +38,13 @@ def build_codec(cfg: CodecConfig) -> ConceptCodec:
         device = _resolve_device(cfg.device)
         model, tokenizer = load_joint(cfg.jepa_checkpoint, device=device)
         return JepaCodec(
-            model, tokenizer, max_tokens=model.cfg.max_tokens, device=device
+            model,
+            tokenizer,
+            max_tokens=model.cfg.max_tokens,
+            device=device,
+            decode_temperature=cfg.decode_temperature,
+            decode_top_k=cfg.decode_top_k,
+            decode_top_p=cfg.decode_top_p,
         )
 
     if kind == "sonar":

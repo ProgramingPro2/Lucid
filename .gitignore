@@ -17,5 +17,10 @@ artifacts/
 
 # Downloaded / generated corpora (keep only the tiny tracked sample)
 data/raw/
-data/books_corpus.txt
+data/*.txt
 !data/sample_corpus.txt
+
+# Frontend build output (source lives in rating-app/viz/)
+rating-app/static/viz/
+rating-app/viz/node_modules/
+rating-app/viz/dist/

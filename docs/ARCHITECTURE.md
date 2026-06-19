@@ -80,7 +80,9 @@ char), `encoder.py`, `decoder.py` (autoregressive), `ema.py`, `losses.py`,
   noise (temperature) for sampling diverse candidates; decode via the codec.
 
 ### Reward (`src/conceptpoc/reward`)
-- `judge.py`: `HeuristicJudge` (offline) and `OpenAIJudge` (LLM-as-judge).
+- `judge.py`: `HeuristicJudge` (offline default), `LemonadeJudge` (local LLM
+  via Lemonade Server), and `OpenAIJudge` (cloud LLM). Select with
+  `JUDGE_BACKEND=heuristic|lemonade|openai`.
 - `quality_control.py`: flags constant / too-fast / consensus-violating raters.
 - `preference.py`: builds (chosen, rejected) pairs from scored rollouts.
 - `reward_model.py`: Bradley-Terry reward model over concept trajectories.

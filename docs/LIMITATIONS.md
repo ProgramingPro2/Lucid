@@ -32,6 +32,9 @@ does, so this document is deliberately blunt.
 - **Heuristic QC is statistical, not semantic.** It catches lazy/troll patterns
   (constant, too-fast, consensus-violating ratings) but not clever bad-faith
   ratings; an LLM QC pass can be layered on.
+- **Local judge quality varies.** The default Lemonade model (Flow-Judge-v0.1) is
+  much stronger than the heuristic proxy but is still not oracle-level; it can
+  disagree with humans and is gameable if used alone.
 
 ## Joint JEPA codec (training your own encoder/decoder)
 - **Collapse is the default outcome without care.** The variance/covariance

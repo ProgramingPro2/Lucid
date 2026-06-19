@@ -1,8 +1,17 @@
 from __future__ import annotations
 
-import numpy as np
+from unittest.mock import MagicMock, patch
 
-from conceptpoc.reward.judge import HeuristicJudge
+import numpy as np
+import pytest
+
+from conceptpoc.reward.judge import (
+    HeuristicJudge,
+    LemonadeJudge,
+    OpenAIJudge,
+    _parse_judge_response,
+    build_judge,
+)
 from conceptpoc.reward.preference import (
     ScoredItem,
     build_preference_pairs,
@@ -10,6 +19,81 @@ from conceptpoc.reward.preference import (
 )
 from conceptpoc.reward.quality_control import HumanRating, QualityControl
 from conceptpoc.reward.reward_model import train_reward_model
+
+
+def test_parse_judge_response_valid_json():
+    result = _parse_judge_response('{"score": 0.75, "rationale": "clear prose"}')
+    assert result.score == 0.75
+    assert result.rationale == "clear prose"
+
+
+def test_parse_judge_response_clips_score():
+    result = _parse_judge_response('{"score": 1.5, "rationale": "high"}')
+    assert result.score == 1.0
+
+
+def test_parse_judge_response_embedded_json():
+    text = 'Here is my rating:\n{"score": 0.6, "rationale": "okay"}\nThanks.'
+    result = _parse_judge_response(text)
+    assert result.score == 0.6
+    assert result.rationale == "okay"
+
+
+def test_parse_judge_response_malformed():
+    result = _parse_judge_response("not json at all")
+    assert result.score == 0.0
+    assert result.rationale.startswith("unparseable")
+
+
+def test_build_judge_explicit_backends(monkeypatch):
+    monkeypatch.delenv("JUDGE_BACKEND", raising=False)
+    monkeypatch.delenv("LEMONADE_JUDGE_MODEL", raising=False)
+    assert isinstance(build_judge(), HeuristicJudge)
+
+    monkeypatch.setenv("JUDGE_BACKEND", "heuristic")
+    assert isinstance(build_judge(), HeuristicJudge)
+
+    monkeypatch.setenv("JUDGE_BACKEND", "openai")
+    with patch("openai.OpenAI"):
+        assert isinstance(build_judge(), OpenAIJudge)
+
+    monkeypatch.setenv("JUDGE_BACKEND", "lemonade")
+    monkeypatch.setenv("LEMONADE_JUDGE_MODEL", "user.Flow-Judge")
+    with patch("openai.OpenAI"):
+        assert isinstance(build_judge(), LemonadeJudge)
+
+
+def test_build_judge_unknown_backend_raises(monkeypatch):
+    monkeypatch.setenv("JUDGE_BACKEND", "unknown")
+    with pytest.raises(ValueError, match="Unknown JUDGE_BACKEND"):
+        build_judge()
+
+
+def test_lemonade_judge_requires_model(monkeypatch):
+    monkeypatch.delenv("LEMONADE_JUDGE_MODEL", raising=False)
+    with patch("openai.OpenAI"):
+        with pytest.raises(ValueError, match="LEMONADE_JUDGE_MODEL"):
+            LemonadeJudge()
+
+
+def test_lemonade_judge_score_mocked(monkeypatch):
+    monkeypatch.setenv("LEMONADE_JUDGE_MODEL", "user.Flow-Judge")
+    mock_client = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.choices = [MagicMock(message=MagicMock(content='{"score": 0.8, "rationale": "good"}'))]
+    mock_client.chat.completions.create.return_value = mock_resp
+
+    with patch("openai.OpenAI", return_value=mock_client):
+        judge = LemonadeJudge()
+        result = judge.score("Start here.", "The story continued calmly.")
+
+    assert result.score == 0.8
+    assert result.rationale == "good"
+    kwargs = mock_client.chat.completions.create.call_args.kwargs
+    assert kwargs["model"] == "user.Flow-Judge"
+    assert kwargs["temperature"] == 0.0
+    assert kwargs["max_completion_tokens"] == 256
+    assert "response_format" not in kwargs
 
 
 def test_heuristic_judge_prefers_varied_text():

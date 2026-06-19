@@ -1,21 +1,19 @@
 """LLM-as-judge.
 
-Scores a generated continuation in [0, 1]. Two backends:
+Scores a generated continuation in [0, 1]. Backends (select via ``JUDGE_BACKEND``):
 
-- ``OpenAIJudge``: asks an LLM to score coherence, relevance and fluency. Used
-  when ``OPENAI_API_KEY`` is set.
-- ``HeuristicJudge``: a deterministic, offline proxy combining lexical
-  repetition, length sanity and semantic-flow signals (cosine similarity
-  between consecutive concept vectors). Lets the whole pipeline run with no
-  network or API key.
+- ``HeuristicJudge``: deterministic, offline proxy (default).
+- ``LemonadeJudge``: local LLM via Lemonade Server's OpenAI-compatible API.
+- ``OpenAIJudge``: cloud LLM via OpenAI.
 
 The heuristic is intentionally a weak stand-in. It is good enough to drive and
-test the self-improvement loop, and it is replaced by the real LLM (and humans)
+test the self-improvement loop, and it is replaced by a real LLM (and humans)
 when those are available.
 """
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from abc import ABC, abstractmethod
@@ -23,11 +21,53 @@ from dataclasses import dataclass
 
 import numpy as np
 
+logger = logging.getLogger(__name__)
+
+_JUDGE_SYSTEM_PROMPT = (
+    "You are a strict writing judge. Rate the continuation for coherence, "
+    "relevance to the prompt, and fluency. Respond with JSON: "
+    '{"score": <0..1 float>, "rationale": "<short>"}.'
+)
+
+_JSON_OBJECT_RE = re.compile(r"\{[^{}]*\"score\"[^{}]*\}", re.DOTALL)
+
 
 @dataclass
 class JudgeResult:
     score: float
     rationale: str = ""
+
+
+def _parse_judge_response(content: str) -> JudgeResult:
+    """Parse a judge LLM reply into a clipped ``JudgeResult``."""
+    text = (content or "").strip()
+    if not text:
+        return JudgeResult(0.0, "empty judge response")
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        match = _JSON_OBJECT_RE.search(text)
+        if match is None:
+            return JudgeResult(0.0, f"unparseable judge response: {text[:120]}")
+        try:
+            data = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return JudgeResult(0.0, f"unparseable judge response: {text[:120]}")
+
+    try:
+        score = float(data["score"])
+    except (KeyError, TypeError, ValueError):
+        return JudgeResult(0.0, f"missing score in judge response: {text[:120]}")
+
+    rationale = data.get("rationale", "")
+    if not isinstance(rationale, str):
+        rationale = str(rationale)
+    return JudgeResult(float(np.clip(score, 0.0, 1.0)), rationale)
+
+
+def _judge_user_message(prompt: str, output: str) -> str:
+    return f"PROMPT:\n{prompt}\n\nCONTINUATION:\n{output}"
 
 
 class Judge(ABC):
@@ -86,26 +126,59 @@ class OpenAIJudge(Judge):
         self._model = model or os.environ.get("OPENAI_JUDGE_MODEL", "gpt-4o-mini")
 
     def score(self, prompt: str, output: str, vectors: np.ndarray | None = None) -> JudgeResult:
-        sys = (
-            "You are a strict writing judge. Rate the continuation for coherence, "
-            "relevance to the prompt, and fluency. Respond with JSON: "
-            '{"score": <0..1 float>, "rationale": "<short>"}.'
-        )
-        user = f"PROMPT:\n{prompt}\n\nCONTINUATION:\n{output}"
         resp = self._client.chat.completions.create(
             model=self._model,
-            messages=[{"role": "system", "content": sys}, {"role": "user", "content": user}],
+            messages=[
+                {"role": "system", "content": _JUDGE_SYSTEM_PROMPT},
+                {"role": "user", "content": _judge_user_message(prompt, output)},
+            ],
             temperature=0.0,
             response_format={"type": "json_object"},
         )
-        data = json.loads(resp.choices[0].message.content)
-        return JudgeResult(float(np.clip(data["score"], 0.0, 1.0)), data.get("rationale", ""))
+        return _parse_judge_response(resp.choices[0].message.content or "")
+
+
+class LemonadeJudge(Judge):
+    def __init__(self, model: str | None = None, base_url: str | None = None) -> None:
+        from openai import OpenAI
+
+        self._client = OpenAI(
+            base_url=base_url
+            or os.environ.get("LEMONADE_BASE_URL", "http://localhost:13305/api/v1"),
+            api_key=os.environ.get("LEMONADE_API_KEY", "lemonade"),
+        )
+        self._model = model or os.environ.get("LEMONADE_JUDGE_MODEL", "")
+        if not self._model:
+            raise ValueError("LEMONADE_JUDGE_MODEL must be set when JUDGE_BACKEND=lemonade")
+        self._warned_parse_failure = False
+
+    def score(self, prompt: str, output: str, vectors: np.ndarray | None = None) -> JudgeResult:
+        resp = self._client.chat.completions.create(
+            model=self._model,
+            messages=[
+                {"role": "system", "content": _JUDGE_SYSTEM_PROMPT},
+                {"role": "user", "content": _judge_user_message(prompt, output)},
+            ],
+            temperature=0.0,
+            max_completion_tokens=256,
+        )
+        result = _parse_judge_response(resp.choices[0].message.content or "")
+        if result.score == 0.0 and result.rationale.startswith("unparseable"):
+            if not self._warned_parse_failure:
+                logger.warning(
+                    "Lemonade judge returned unparseable output; check lemonade status / "
+                    "lemonade list and that the model is loaded"
+                )
+                self._warned_parse_failure = True
+        return result
 
 
 def build_judge() -> Judge:
-    if os.environ.get("OPENAI_API_KEY"):
-        try:
-            return OpenAIJudge()
-        except Exception:
-            pass
-    return HeuristicJudge()
+    backend = os.environ.get("JUDGE_BACKEND", "heuristic").lower()
+    if backend == "lemonade":
+        return LemonadeJudge()
+    if backend == "openai":
+        return OpenAIJudge()
+    if backend == "heuristic":
+        return HeuristicJudge()
+    raise ValueError(f"Unknown JUDGE_BACKEND: {backend!r} (expected heuristic, lemonade, or openai)")

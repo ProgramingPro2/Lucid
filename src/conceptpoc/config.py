@@ -31,6 +31,11 @@ class CodecConfig:
     # Checkpoint produced by `train-joint`; loaded when kind == "jepa".
     # If None, defaults to <artifacts_dir>/jepa/joint.pt.
     jepa_checkpoint: str | None = None
+    # Generative decode sampling (jepa codec only). 0.0 temperature = greedy
+    # (most faithful). top_k/top_p restrict the candidate set when sampling.
+    decode_temperature: float = 0.0
+    decode_top_k: int = 0
+    decode_top_p: float = 0.0
 
 
 @dataclass
@@ -104,6 +109,12 @@ class JepaConfig:
     var_weight: float = 1.0
     cov_weight: float = 0.04
     var_margin: float = 1.0
+    # Anti-anisotropy (Wang & Isola uniformity) on the normalized concept
+    # vectors. VICReg above is mean-invariant and does not prevent angular
+    # collapse into a narrow cone (which inflates next_vector_cosine while
+    # retrieval_top1 stays ~0). Default 0.0 keeps legacy behavior; experiment
+    # configs enable it (e.g. 1.0) to keep the directional space spread out.
+    uniformity_weight: float = 0.0
     # Warn if the mean per-dim std of the unnormalized embedding falls below
     # this (collapse alarm). Healthy training pushes it toward var_margin.
     collapse_std_threshold: float = 0.1
@@ -116,6 +127,12 @@ class JepaConfig:
     grad_clip: float = 1.0
     context_len: int = 16
     seed: int = 0
+    # Held-out fraction of windows used to monitor prediction generalization and
+    # select the best checkpoint (the encoder can over-train on reconstruction).
+    val_fraction: float = 0.1
+    # Stop early after this many prediction-phase epochs without val improvement
+    # (0 disables early stopping; the best-by-val checkpoint is kept regardless).
+    patience: int = 0
 
 
 @dataclass

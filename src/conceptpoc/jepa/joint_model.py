@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from ..config import JepaConfig, PredictorConfig
@@ -27,8 +28,10 @@ from .encoder import TextEncoder
 from .losses import (
     covariance_loss,
     mean_dim_std,
+    mean_pairwise_cosine,
     prediction_loss,
     reconstruction_loss,
+    uniformity_loss,
     variance_loss,
 )
 
@@ -40,8 +43,15 @@ class JepaForward:
     pred: torch.Tensor
     var: torch.Tensor
     cov: torch.Tensor
+    unif: torch.Tensor
     recon_acc: float
     std_z: float
+    # Mean cosine between predicted and target next-vectors (a monitoring metric,
+    # not part of the loss). Used for validation / best-checkpoint selection.
+    pred_cos: float
+    # Anisotropy monitor: mean cosine between distinct online concept vectors.
+    # High values (-> 1) mean the space collapsed into a narrow directional cone.
+    aniso: float
 
 
 class JointJepa(nn.Module):
@@ -87,10 +97,15 @@ class JointJepa(nn.Module):
         )
         recon = reconstruction_loss(logits_v, ids_v, self.pad_id)
 
-        # Anti-collapse regularization on the *unnormalized* projection.
+        # Anti-collapse regularization on the *unnormalized* projection (keeps
+        # per-dimension variance up; mean-invariant so it ignores anisotropy).
         var = variance_loss(raw_v, self.cfg.var_margin)
         cov = covariance_loss(raw_v)
         std_z = mean_dim_std(raw_v)
+        # Anti-anisotropy on the *normalized* vectors (spreads directions on the
+        # hypersphere so the predictor can't win by emitting the mean direction).
+        unif = uniformity_loss(z_v)
+        aniso = mean_pairwise_cosine(z_v)
 
         # Scatter online + EMA vectors back to a (B, S, dim) grid.
         z_flat = torch.zeros(b * s, dim, device=device)
@@ -105,6 +120,7 @@ class JointJepa(nn.Module):
         # Prediction: predict sentence i from sentences 0..i-1. Documents are
         # prefix-valid, so sent_valid[:, i] implies a fully-valid context.
         pred_accum = z.new_zeros(())
+        cos_accum = 0.0
         count = 0
         for i in range(1, s):
             rows = sent_valid[:, i].nonzero(as_tuple=False).squeeze(-1)
@@ -114,14 +130,20 @@ class JointJepa(nn.Module):
             ctx_pad = torch.zeros(rows.numel(), i, dtype=torch.bool, device=device)
             pred = self.predictor(context, ctx_pad)
             pred_accum = pred_accum + prediction_loss(pred, targets[rows, i, :]) * rows.numel()
+            with torch.no_grad():
+                cos_accum += float(
+                    F.cosine_similarity(pred, targets[rows, i, :], dim=-1).sum().item()
+                )
             count += rows.numel()
         pred = pred_accum / max(1, count)
+        pred_cos = cos_accum / max(1, count)
 
         total = (
             recon.loss
             + alpha * pred
             + self.cfg.var_weight * var
             + self.cfg.cov_weight * cov
+            + self.cfg.uniformity_weight * unif
         )
         return JepaForward(
             total=total,
@@ -129,8 +151,11 @@ class JointJepa(nn.Module):
             pred=pred,
             var=var,
             cov=cov,
+            unif=unif,
             recon_acc=recon.accuracy,
             std_z=std_z,
+            pred_cos=pred_cos,
+            aniso=aniso,
         )
 
     @torch.no_grad()

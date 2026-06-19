@@ -23,6 +23,8 @@ class JepaCodec(ConceptCodec):
         max_tokens: int,
         device: str = "cpu",
         decode_temperature: float = 0.0,
+        decode_top_k: int = 0,
+        decode_top_p: float = 0.0,
     ) -> None:
         self._model = model.to(device)
         self._model.eval()
@@ -30,6 +32,8 @@ class JepaCodec(ConceptCodec):
         self._max_tokens = max_tokens
         self._device = device
         self._decode_temperature = decode_temperature
+        self._decode_top_k = decode_top_k
+        self._decode_top_p = decode_top_p
 
     @property
     def dim(self) -> int:
@@ -62,5 +66,7 @@ class JepaCodec(ConceptCodec):
             eos_id=self._tok.eos_id,
             max_tokens=self._max_tokens,
             temperature=self._decode_temperature,
+            top_k=self._decode_top_k,
+            top_p=self._decode_top_p,
         )
         return [self._tok.decode(ids) for ids in token_lists]

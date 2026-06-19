@@ -27,8 +27,8 @@ text --[frozen encoder]--> concept vectors --[predictor]--> next concept vector 
   vectors, trained to predict the next vector (MSE + cosine loss).
 - **Generation** (`src/conceptpoc/generate`): autoregressive rollout in concept
   space, then decode.
-- **Reward** (`src/conceptpoc/reward`): heuristic/OpenAI judge, human-rating
-  quality control, preference pairs, and a reward model.
+- **Reward** (`src/conceptpoc/reward`): heuristic, Lemonade, or OpenAI judge;
+  human-rating quality control, preference pairs, and a reward model.
 - **Loop** (`src/conceptpoc/loop`): reward-ranked fine-tuning (RAFT/RWR).
 - **Experts** (`src/conceptpoc/experts`): stretch prototype of a gating router
   over multiple predictor experts.
@@ -47,8 +47,31 @@ pip install -e .
 Optional generative decoding via SONAR: `pip install -r requirements-sonar.txt`
 (stricter Python support; the project runs without it).
 
-Optional LLM judge: copy `.env.example` to `.env` and set `OPENAI_API_KEY`.
-Without it, a deterministic offline heuristic judge is used.
+Optional LLM judge: copy `.env.example` to `.env` and set `JUDGE_BACKEND` to
+`lemonade` or `openai`. Without an explicit backend, a deterministic offline
+heuristic judge is used.
+
+#### Local judge via Lemonade (recommended for private/offline scoring)
+
+[Lemonade Server](https://lemonade-server.ai/) exposes an OpenAI-compatible API
+for local models. Lucid uses [Flow-Judge-v0.1](https://huggingface.co/flowaicom/Flow-Judge-v0.1-GGUF),
+a 3.8B model purpose-built for LLM-as-judge evaluation.
+
+```bash
+# Install Lemonade Server, then pull and run the judge model
+lemonade status
+lemonade pull flowaicom/Flow-Judge-v0.1-GGUF:Q4_K_M --yes
+lemonade list   # copy the registered model id
+lemonade run <model-id>
+
+# Configure Lucid (.env)
+# JUDGE_BACKEND=lemonade
+# LEMONADE_JUDGE_MODEL=<model-id from lemonade list>
+```
+
+#### Cloud judge via OpenAI
+
+Set `JUDGE_BACKEND=openai` and `OPENAI_API_KEY` in `.env`.
 
 ## Usage
 
@@ -113,6 +136,18 @@ uvicorn app:app --app-dir rating-app
 Open the page, enter a name, and rate continuations. Push generated items in via
 `POST /api/items`; export ratings via `GET /api/export`; check rater quality via
 `GET /api/quality`.
+
+### Model visualizer
+
+An interactive React app explores sentence-embedding space in 3D and diagrams the
+model architecture / data flow. See [rating-app/viz/README.md](rating-app/viz/README.md).
+
+```bash
+cd rating-app/viz && npm install && npm run dev          # dev server
+cd rating-app/viz && npm run build:fastapi                 # build for /viz mount
+uvicorn app:app --app-dir rating-app                       # then open /viz/
+python tools/export_embeddings.py                          # regenerate embeddings.json
+```
 
 ## Tests
 

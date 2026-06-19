@@ -15,6 +15,10 @@ python-multipart>=0.0.9
 # Utilities
 requests>=2.32
 tqdm>=4.66
+scikit-learn>=1.4
+
+# Corpus preparation for scaling experiments (Wikipedia/Gutenberg via HF Hub)
+datasets>=3.0
 
 # Optional: OpenAI-backed LLM judge (a heuristic judge is used if unavailable)
 openai>=1.40
