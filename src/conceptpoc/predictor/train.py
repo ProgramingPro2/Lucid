@@ -1,6 +1,7 @@
 """Training loop for the concept predictor."""
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 
 import torch
@@ -17,6 +18,8 @@ class TrainHistory:
     train_loss: list[float] = field(default_factory=list)
     val_loss: list[float] = field(default_factory=list)
     val_cosine: list[float] = field(default_factory=list)
+    best_epoch: int = -1
+    best_val_cosine: float = float("-inf")
 
 
 def _device(name: str = "auto") -> torch.device:
@@ -67,6 +70,7 @@ def train_predictor(
     )
 
     history = TrainHistory()
+    best_state: dict | None = None
     for epoch in range(train_cfg.epochs):
         model.train()
         epoch_loss = 0.0
@@ -96,6 +100,16 @@ def train_predictor(
         )
         history.val_loss.append(val_loss)
         history.val_cosine.append(val_cos)
+
+        # The predictor overfits well before the final epoch; keep the
+        # best-by-val-cosine weights (val_cosine is a reliable signal here).
+        if val_cos > history.best_val_cosine:
+            history.best_val_cosine = val_cos
+            history.best_epoch = epoch + 1
+            best_state = copy.deepcopy(
+                {k: v.detach().cpu() for k, v in model.state_dict().items()}
+            )
+
         log_epoch(
             "train",
             epoch + 1,
@@ -107,6 +121,9 @@ def train_predictor(
             },
             enabled=progress,
         )
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
 
     return model, history
 

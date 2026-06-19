@@ -74,8 +74,16 @@ class TextDecoder(nn.Module):
         eos_id: int,
         max_tokens: int,
         temperature: float = 0.0,
+        top_k: int = 0,
+        top_p: float = 0.0,
     ) -> list[list[int]]:
-        """Autoregressively decode token ids for each row of ``z``."""
+        """Autoregressively decode token ids for each row of ``z``.
+
+        ``temperature == 0`` (or no sampling knobs) decodes greedily. Otherwise
+        logits are temperature-scaled and optionally restricted to the top-``k``
+        tokens and/or the smallest set whose cumulative probability exceeds
+        ``top_p`` (nucleus) before sampling.
+        """
         self.eval()
         device = z.device
         batch = z.size(0)
@@ -87,7 +95,8 @@ class TextDecoder(nn.Module):
             pad_mask = torch.zeros_like(tokens, dtype=torch.bool)
             logits = self.forward(z, tokens, pad_mask)[:, -1]
             if temperature and temperature > 0:
-                probs = F.softmax(logits / temperature, dim=-1)
+                logits = _filter_logits(logits / temperature, top_k, top_p)
+                probs = F.softmax(logits, dim=-1)
                 nxt = torch.multinomial(probs, 1).squeeze(1)
             else:
                 nxt = logits.argmax(dim=-1)
@@ -101,3 +110,19 @@ class TextDecoder(nn.Module):
             if bool(done.all()):
                 break
         return outputs
+
+
+def _filter_logits(logits: torch.Tensor, top_k: int, top_p: float) -> torch.Tensor:
+    """Mask logits (B, V) to the top-k and/or nucleus (top-p) set with -inf."""
+    if top_k and top_k > 0:
+        k = min(top_k, logits.size(-1))
+        kth = logits.topk(k, dim=-1).values[:, -1, None]
+        logits = logits.masked_fill(logits < kth, float("-inf"))
+    if top_p and 0.0 < top_p < 1.0:
+        sorted_logits, sorted_idx = torch.sort(logits, descending=True, dim=-1)
+        cum = F.softmax(sorted_logits, dim=-1).cumsum(dim=-1)
+        # Keep tokens up to and including the one that crosses top_p.
+        remove = cum - F.softmax(sorted_logits, dim=-1) >= top_p
+        remove_orig = remove.gather(-1, sorted_idx.argsort(dim=-1))
+        logits = logits.masked_fill(remove_orig, float("-inf"))
+    return logits

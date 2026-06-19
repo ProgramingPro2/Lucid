@@ -9,12 +9,14 @@ Run: uvicorn app:app --app-dir rating-app --reload
 """
 from __future__ import annotations
 
+import json
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
@@ -22,6 +24,10 @@ import db
 
 # Make the conceptpoc package importable for the quality-control pass.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+APP_DIR = Path(__file__).parent
+VIZ_DIR = APP_DIR / "static" / "viz"
+EMBEDDINGS = APP_DIR / "viz" / "public" / "embeddings.json"
 
 
 @asynccontextmanager
@@ -31,7 +37,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Concept POC Rating App", lifespan=lifespan)
-templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -104,3 +110,14 @@ def api_quality() -> JSONResponse:
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", **db.counts()}
+
+
+@app.get("/api/embeddings")
+def api_embeddings() -> JSONResponse:
+    if not EMBEDDINGS.is_file():
+        return JSONResponse({"error": "embeddings.json not found"}, status_code=404)
+    return JSONResponse(json.loads(EMBEDDINGS.read_text(encoding="utf-8")))
+
+
+if VIZ_DIR.is_dir():
+    app.mount("/viz", StaticFiles(directory=str(VIZ_DIR), html=True), name="viz")

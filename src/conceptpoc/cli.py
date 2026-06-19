@@ -83,6 +83,8 @@ def cmd_prepare(cfg: Config, *, progress: bool = True) -> None:
     docs = load_documents(
         cfg.data.corpus_path, cfg.data.min_sentence_chars, cfg.data.max_sentence_chars
     )
+    if _is_jepa(cfg):
+        _ensure_jepa_checkpoint(cfg)
     codec = build_codec(cfg.codec)
     cache = EmbeddingCache(cfg.artifacts_dir / "cache")
     codec_id = f"{cfg.codec.kind}:{cfg.codec.model_name}"
@@ -113,10 +115,12 @@ def cmd_train(cfg: Config, *, progress: bool = True) -> None:
         dataset, cfg.predictor, cfg.train, progress=progress
     )
     save_predictor(_paths(cfg)["predictor"], model)
-    print(
-        f"trained predictor ({model.num_parameters():,} params); "
-        f"final val cosine={history.val_cosine[-1]:.3f}"
+    best = (
+        f"best val cosine={history.best_val_cosine:.3f} (epoch {history.best_epoch})"
+        if history.best_epoch > 0
+        else f"final val cosine={history.val_cosine[-1]:.3f}"
     )
+    print(f"trained predictor ({model.num_parameters():,} params); {best}")
 
 
 def cmd_train_joint(cfg: Config, *, progress: bool = True) -> None:
@@ -134,14 +138,23 @@ def cmd_train_joint(cfg: Config, *, progress: bool = True) -> None:
     metrics = {
         "final": history.latest(),
         "std_z_per_epoch": [round(s, 4) for s in history.std_z],
+        "aniso_per_epoch": [round(a, 4) for a in history.aniso],
         "recon_acc_per_epoch": [round(a, 4) for a in history.recon_acc],
         "pred_per_epoch": [round(p, 4) for p in history.pred],
+        "val_pred_cos_per_epoch": [round(v, 4) for v in history.val_pred_cos],
+        "best_epoch": history.best_epoch,
+        "best_val_pred_cos": round(history.best_val_cos, 4) if history.best_epoch > 0 else None,
         "alpha_per_epoch": history.alpha,
     }
     write_json(cfg.artifacts_dir / "jepa" / "metrics.json", metrics)
+    best = (
+        f" best epoch={history.best_epoch} (val_pred_cos={history.best_val_cos:.3f})"
+        if history.best_epoch > 0
+        else ""
+    )
     print(
         f"trained joint JEPA codec; final recon_acc={history.recon_acc[-1]:.3f} "
-        f"std_z={history.std_z[-1]:.3f}"
+        f"std_z={history.std_z[-1]:.3f}{best}"
     )
     if history.collapsed:
         print(
@@ -178,7 +191,11 @@ def cmd_eval(cfg: Config, *, progress: bool = True) -> None:
     metrics = {
         "reconstruction_cosine": recon.mean_cosine,
         "next_vector_cosine": acc.mean_cosine,
+        "next_vector_centered_cosine": acc.centered_cosine,
+        "anisotropy_floor": acc.anisotropy,
         "next_vector_retrieval_top1": acc.retrieval_top1,
+        "next_vector_retrieval_top5": acc.retrieval_top5,
+        "next_vector_mrr": acc.mrr,
         "eval_items": acc.n,
     }
     write_json(_paths(cfg)["metrics"], metrics)

@@ -64,6 +64,39 @@ def covariance_loss(z: torch.Tensor) -> torch.Tensor:
     return off_diag.pow(2).sum() / d
 
 
+def uniformity_loss(z: torch.Tensor, t: float = 2.0) -> torch.Tensor:
+    """Anti-anisotropy term (Wang & Isola, 2020) on the *normalized* vectors.
+
+    VICReg's variance/covariance terms are mean-invariant, so they keep each
+    dimension's spread high yet do nothing about a large shared offset that
+    makes every normalized vector point in nearly the same direction (angular
+    collapse / anisotropy). This term directly pushes the unit vectors apart on
+    the hypersphere by minimizing log E[exp(-t * ||z_i - z_j||^2)]. For unit
+    vectors ||z_i - z_j||^2 = 2 - 2 cos, so spreading directions lowers the loss.
+    """
+    z = F.normalize(z, dim=-1)
+    if z.size(0) < 2:
+        return z.new_zeros(())
+    sq_dist = torch.pdist(z, p=2).pow(2)
+    n_pairs = sq_dist.new_tensor(float(sq_dist.numel()))
+    # log E[exp(-t * sq_dist)] computed stably via logsumexp.
+    return torch.logsumexp(-t * sq_dist, dim=0) - torch.log(n_pairs)
+
+
+def mean_pairwise_cosine(z: torch.Tensor, max_rows: int = 2048) -> float:
+    """Anisotropy monitor: mean cosine between distinct normalized vectors."""
+    with torch.no_grad():
+        z = F.normalize(z, dim=-1)
+        if z.size(0) < 2:
+            return float("nan")
+        if z.size(0) > max_rows:
+            z = z[:max_rows]
+        sims = z @ z.T
+        n = z.size(0)
+        off = (sims.sum() - n) / (n * (n - 1))
+        return float(off.item())
+
+
 def mean_dim_std(z: torch.Tensor) -> float:
     """Collapse monitor: mean per-dimension std across the batch."""
     with torch.no_grad():

@@ -54,3 +54,15 @@ def test_full_rating_flow(client):
 
     assert c.get("/api/quality").status_code == 200
     assert "Start rating" in c.get("/").text
+
+
+def test_api_embeddings(client):
+    c, _db = client
+    resp = c.get("/api/embeddings")
+    if resp.status_code == 404:
+        pytest.skip("embeddings.json not present")
+    data = resp.json()
+    assert isinstance(data, list)
+    assert len(data) > 0
+    sample = data[0]
+    assert set(sample.keys()) >= {"id", "text", "x", "y", "z", "cluster"}
