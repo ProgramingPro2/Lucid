@@ -49,6 +49,11 @@ class PredictorConfig:
     # Loss weighting between MSE and (1 - cosine) on the predicted next vector.
     cosine_weight: float = 1.0
     mse_weight: float = 1.0
+    # E10 conditioning (default off = exact legacy behavior). When enabled, the
+    # predictor gains a learned segment/role embedding (0=instruction,
+    # 1=response) and/or a theme-vector projection added to every position.
+    use_segment_embedding: bool = False
+    use_theme: bool = False
 
 
 @dataclass
@@ -136,6 +141,43 @@ class JepaConfig:
 
 
 @dataclass
+class InstructionConfig:
+    """E10 instruction/theme conditioning data + training (default off).
+
+    All network/HF/LLM access is lazy and opt-in via the explicit ``source`` and
+    ``author_with_llm`` flags so nothing downloads or calls a server unless asked.
+    """
+
+    # "synthesize" (build from the local corpus with templates) or "borrow"
+    # (download a small open instruction set via HF datasets).
+    source: str = "synthesize"
+    # Cache of encoded (instruction, response) concept pairs.
+    cache_path: str = "artifacts/instructions/pairs.npz"
+
+    # --- borrow ---
+    hf_dataset: str = "databricks/databricks-dolly-15k"
+    hf_split: str = "train"
+    max_pairs: int = 256
+    # Per-record field names (Dolly uses instruction/response; Alpaca too).
+    instruction_field: str = "instruction"
+    response_field: str = "response"
+
+    # --- synthesize ---
+    templates: list[str] = field(
+        default_factory=lambda: ["Continue:", "Summarize:", "Write about {theme}"]
+    )
+    themes: list[str] = field(
+        default_factory=lambda: ["nature", "the city", "memory", "the sea"]
+    )
+    max_response_sentences: int = 8
+    # Opt-in LLM-authored instructions via the lemonade client wiring (lazy).
+    author_with_llm: bool = False
+
+    # Cap on sentences encoded per side, keeps windows within max_seq_len.
+    max_instruction_sentences: int = 4
+
+
+@dataclass
 class LoopConfig:
     # Reward-ranked fine-tuning (RAFT/RWR): sample N rollouts per prompt, keep
     # the top fraction by reward, fine-tune the predictor on them.
@@ -144,8 +186,65 @@ class LoopConfig:
     rollout_steps: int = 6
     iterations: int = 3
     finetune_epochs: int = 2
+    # Number of prompts drawn (spread across the cached set) for a RAFT run.
+    # Larger than the old hardcoded 8 so alignment does not overfit a tiny slice.
+    n_prompts: int = 64
     # Blend of LLM-judge vs human reward when both are present (0..1 -> human).
     human_weight: float = 0.5
+
+
+@dataclass
+class EvalConfig:
+    """Per-capability generation eval harness (see ``eval/harness.py``).
+
+    ``eval_path`` may be a single ``.jsonl`` file or a directory of them (one
+    file per capability). ``output_dir`` is resolved relative to
+    ``artifacts_dir`` when not absolute. ``rating_app_url`` is only used by the
+    optional ``--push-rating-app`` / ``--merge-human`` flags.
+    """
+
+    eval_path: str = "data/eval"
+    rollout_steps: int = 6
+    output_dir: str = "eval"
+    rating_app_url: str = "http://localhost:8000"
+
+
+@dataclass
+class GpuGateConfig:
+    """Polite GPU sharing: pause training while other processes actively compute.
+
+    The trigger is per-process **compute (SM) utilization** via ``nvidia-smi
+    pmon``, not VRAM, so a model merely parked in VRAM but idle (e.g. an LLM
+    server between requests) is ignored. When other processes' combined SM usage
+    exceeds ``foreign_util_pct``, the trainer offloads to CPU (releasing VRAM and
+    dropping our GPU utilization to ~0) and polls every ``poll_interval_s``
+    seconds, resuming after ``clear_polls`` consecutive readings below
+    ``resume_util_pct``. Disabled by default; enable in a config or via the
+    ``--gpu-gate`` CLI flag.
+    """
+
+    enabled: bool = False
+    # Pause when other processes' combined SM utilization is at/above this %.
+    # Set above idle desktop rendering noise and below an active game/LLM load.
+    foreign_util_pct: float = 40.0
+    # Resume once foreign SM utilization drops below this % (hysteresis).
+    resume_util_pct: float = 20.0
+    # pmon snapshots to average per probe (each ~1s); smooths transient spikes.
+    pmon_samples: int = 2
+    # Minimum wall-clock seconds between probes while training (bounds overhead).
+    check_interval_s: float = 20.0
+    # Seconds between probes while paused.
+    poll_interval_s: float = 15.0
+    # Consecutive clear readings required before resuming (debounces flapping).
+    clear_polls: int = 3
+    # Optional secondary trigger: also pause if other processes hold this many MB
+    # of VRAM (0 = disabled, the default, so idle parked models do not pause us).
+    mem_trigger_mb: float = 0.0
+    # Offload model+optimizer to CPU and free VRAM when pausing (vs. compute-only
+    # pause that keeps VRAM reserved). Recommended True so games can use the VRAM.
+    release_memory: bool = True
+    # GPU index to watch; None = the training device's index.
+    device_index: int | None = None
 
 
 @dataclass
@@ -157,6 +256,9 @@ class Config:
     data: DataConfig = field(default_factory=DataConfig)
     loop: LoopConfig = field(default_factory=LoopConfig)
     jepa: JepaConfig = field(default_factory=JepaConfig)
+    gpu_gate: GpuGateConfig = field(default_factory=GpuGateConfig)
+    eval: EvalConfig = field(default_factory=EvalConfig)
+    instruction: InstructionConfig = field(default_factory=InstructionConfig)
 
     @classmethod
     def load(cls, path: str | os.PathLike | None = None) -> "Config":

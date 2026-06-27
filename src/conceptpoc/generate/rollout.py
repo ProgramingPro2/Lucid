@@ -69,6 +69,78 @@ def generate_rollout(
     )
 
 
+@torch.no_grad()
+def generate_conditioned(
+    model: ConceptPredictor,
+    instruction_vecs: np.ndarray,
+    steps: int,
+    theme_vec: np.ndarray | None = None,
+    temperature: float = 0.0,
+    max_context: int | None = None,
+    device: str | torch.device = "cpu",
+    rng: np.random.Generator | None = None,
+) -> Rollout:
+    """Roll out response vectors conditioned on an instruction (+ optional theme).
+
+    The instruction vectors form a segment-0 prefix; each generated response
+    vector is appended as segment 1 and fed back in. Greedy (``temperature=0``)
+    generation is deterministic. Returns a ``Rollout`` whose ``seed_vectors``
+    are the instruction and ``generated_vectors`` are the response.
+    """
+    model.eval()
+    dev = torch.device(device) if isinstance(device, str) else device
+    model.to(dev)
+    rng = rng or np.random.default_rng()
+    max_context = max_context or model.cfg.max_seq_len
+
+    instr = np.asarray(instruction_vecs, dtype=np.float32)
+    if instr.ndim == 1:
+        instr = instr[None, :]
+    n_instr = instr.shape[0]
+    context = [v for v in instr]
+    generated: list[np.ndarray] = []
+
+    theme_t = None
+    if theme_vec is not None:
+        theme_t = torch.from_numpy(
+            np.asarray(theme_vec, dtype=np.float32).reshape(1, -1)
+        ).to(dev)
+
+    for _ in range(steps):
+        window = np.stack(context[-max_context:])
+        ctx = torch.from_numpy(window).unsqueeze(0).to(dev)
+        # Segment id 0 for instruction positions still inside the window, 1 for
+        # already-generated response positions.
+        n_resp_in_window = len(generated[-max_context:]) if generated else 0
+        n_instr_in_window = window.shape[0] - n_resp_in_window
+        seg = torch.cat(
+            [
+                torch.zeros(n_instr_in_window, dtype=torch.long),
+                torch.ones(n_resp_in_window, dtype=torch.long),
+            ]
+        ).unsqueeze(0).to(dev)
+        pred = (
+            model(ctx, segment_ids=seg, theme_vec=theme_t)
+            .squeeze(0)
+            .cpu()
+            .numpy()
+        )
+        if temperature > 0:
+            pred = pred + rng.normal(0.0, temperature, size=pred.shape).astype(
+                np.float32
+            )
+            pred = ConceptCodec.normalize(pred)
+        context.append(pred)
+        generated.append(pred)
+
+    return Rollout(
+        seed_vectors=instr,
+        generated_vectors=np.stack(generated)
+        if generated
+        else np.zeros((0, instr.shape[1]), dtype=np.float32),
+    )
+
+
 def rollout_to_text(rollout: Rollout, codec: ConceptCodec, include_seed: bool = False) -> list[str]:
     vectors = rollout.all_vectors if include_seed else rollout.generated_vectors
     if len(vectors) == 0:

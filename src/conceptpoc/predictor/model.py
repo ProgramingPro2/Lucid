@@ -35,12 +35,30 @@ class _PositionalEncoding(nn.Module):
 
 
 class ConceptPredictor(nn.Module):
+    """Causal transformer over concept vectors.
+
+    Optional conditioning (E10), enabled per-field via ``PredictorConfig`` and
+    fully backward compatible: when no ``segment_ids``/``theme_vec`` are passed
+    the extra modules contribute nothing, so ``forward`` returns exactly the
+    same output as before. A learned segment embedding distinguishes
+    instruction (0) from response (1) positions, and an optional global theme
+    vector is added to every position.
+    """
+
     def __init__(self, concept_dim: int, cfg: PredictorConfig) -> None:
         super().__init__()
         self.concept_dim = concept_dim
         self.cfg = cfg
         self.in_proj = nn.Linear(concept_dim, cfg.d_model)
         self.pos = _PositionalEncoding(cfg.d_model, cfg.max_seq_len)
+        # Conditioning modules are created only when enabled so existing
+        # checkpoints (trained without them) still load with a strict state_dict.
+        self.segment_emb = (
+            nn.Embedding(2, cfg.d_model) if cfg.use_segment_embedding else None
+        )
+        self.theme_proj = (
+            nn.Linear(concept_dim, cfg.d_model) if cfg.use_theme else None
+        )
         layer = nn.TransformerEncoderLayer(
             d_model=cfg.d_model,
             nhead=cfg.n_heads,
@@ -57,12 +75,24 @@ class ConceptPredictor(nn.Module):
         self.out_proj = nn.Linear(cfg.d_model, concept_dim)
 
     def forward(
-        self, context: torch.Tensor, pad_mask: torch.Tensor | None = None
+        self,
+        context: torch.Tensor,
+        pad_mask: torch.Tensor | None = None,
+        *,
+        segment_ids: torch.Tensor | None = None,
+        theme_vec: torch.Tensor | None = None,
+        return_sequence: bool = False,
     ) -> torch.Tensor:
         """context: (B, T, dim). Returns the predicted next vector (B, dim).
 
         ``pad_mask`` is a boolean key-padding mask (True=pad) for right-padded
         sequences. The prediction is read from each sequence's last real token.
+
+        Optional conditioning (no effect when ``None``):
+        - ``segment_ids`` (B, T) long tensor of 0/1 role ids.
+        - ``theme_vec`` (B, dim) global theme added to every position.
+        ``return_sequence`` returns a per-position prediction (B, T, dim)
+        instead of only the last real token; used by teacher-forced training.
         """
         seq_len = context.size(1)
         # Boolean causal mask (True = disallowed) keeps the mask type consistent
@@ -71,9 +101,16 @@ class ConceptPredictor(nn.Module):
             torch.ones(seq_len, seq_len, dtype=torch.bool, device=context.device),
             diagonal=1,
         )
-        h = self.pos(self.in_proj(context))
+        h = self.in_proj(context)
+        if segment_ids is not None and self.segment_emb is not None:
+            h = h + self.segment_emb(segment_ids)
+        if theme_vec is not None and self.theme_proj is not None:
+            h = h + self.theme_proj(theme_vec).unsqueeze(1)
+        h = self.pos(h)
         h = self.encoder(h, mask=causal, src_key_padding_mask=pad_mask)
         h = self.norm(h)
+        if return_sequence:
+            return F.normalize(self.out_proj(h), dim=-1)
         last = self._last_real_token(h, pad_mask)
         pred = self.out_proj(last)
         return F.normalize(pred, dim=-1)

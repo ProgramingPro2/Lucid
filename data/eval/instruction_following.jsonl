@@ -1,0 +1,24 @@
+{"id": "instr-001", "capability": "instruction_following", "prompt": "Write a short reminder asking a coworker to water the office plants over the weekend."}
+{"id": "instr-002", "capability": "instruction_following", "prompt": "Explain to a beginner how to brew a single cup of pour-over coffee."}
+{"id": "instr-003", "capability": "instruction_following", "prompt": "Describe a quiet morning routine that helps someone feel focused before work."}
+{"id": "instr-004", "capability": "instruction_following", "prompt": "Summarize the benefits of taking a short walk after lunch."}
+{"id": "instr-005", "capability": "instruction_following", "prompt": "Write a friendly welcome message for a new member joining a hobby club."}
+{"id": "instr-006", "capability": "instruction_following", "prompt": "Give three practical tips for keeping a small kitchen organized."}
+{"id": "instr-007", "capability": "instruction_following", "prompt": "Explain how to politely decline a meeting invitation without giving offense."}
+{"id": "instr-008", "capability": "instruction_following", "prompt": "Describe how to pack a backpack for a single night of camping."}
+{"id": "instr-009", "capability": "instruction_following", "prompt": "Write a brief thank-you note to a neighbor who collected your mail."}
+{"id": "instr-010", "capability": "instruction_following", "prompt": "Explain the steps to safely change a flat bicycle tire on the roadside."}
+{"id": "instr-011", "capability": "instruction_following", "prompt": "Give advice on how to study for an exam when you only have one evening left."}
+{"id": "instr-012", "capability": "instruction_following", "prompt": "Describe how to set up a simple weekly budget for groceries."}
+{"id": "instr-013", "capability": "instruction_following", "prompt": "Write a short pep talk for a friend who is nervous about a job interview."}
+{"id": "instr-014", "capability": "instruction_following", "prompt": "Explain how to make a houseplant thrive near a window with little direct sun."}
+{"id": "instr-015", "capability": "instruction_following", "prompt": "Summarize how to introduce two strangers at a small dinner party."}
+{"id": "instr-016", "capability": "instruction_following", "prompt": "Give clear directions for folding a fitted bed sheet neatly."}
+{"id": "instr-017", "capability": "instruction_following", "prompt": "Write a note encouraging a teammate after a project missed its deadline."}
+{"id": "instr-018", "capability": "instruction_following", "prompt": "Explain how to choose a ripe avocado at the grocery store."}
+{"id": "instr-019", "capability": "instruction_following", "prompt": "Describe a calming way to spend the last hour before going to sleep."}
+{"id": "instr-020", "capability": "instruction_following", "prompt": "Give tips for taking a clear photograph of a meal in dim restaurant lighting."}
+{"id": "instr-021", "capability": "instruction_following", "prompt": "Write instructions for watering a vegetable garden during a hot dry week."}
+{"id": "instr-022", "capability": "instruction_following", "prompt": "Explain how to start a friendly conversation with someone at a conference."}
+{"id": "instr-023", "capability": "instruction_following", "prompt": "Summarize how to clean a pair of muddy running shoes without damaging them."}
+{"id": "instr-024", "capability": "instruction_following", "prompt": "Write a short message inviting a friend to help you move some furniture on Saturday."}
