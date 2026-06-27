@@ -45,6 +45,22 @@ def test_parse_judge_response_malformed():
     assert result.rationale.startswith("unparseable")
 
 
+def test_parse_judge_response_code_fenced():
+    text = '```json\n{"score": 0.7, "rationale": "good"}\n```'
+    result = _parse_judge_response(text)
+    assert result.score == 0.7
+    assert result.rationale == "good"
+
+
+def test_parse_judge_response_truncated_unclosed():
+    # Chat models emit score before a long rationale; the token cap can truncate
+    # the reply before the closing brace. The score must still be recovered.
+    text = '```json\n{\n  "score": 0.25,\n  "rationale": "Partially relevant but the'
+    result = _parse_judge_response(text)
+    assert result.score == 0.25
+    assert result.rationale.startswith("Partially relevant")
+
+
 def test_build_judge_explicit_backends(monkeypatch):
     monkeypatch.delenv("JUDGE_BACKEND", raising=False)
     monkeypatch.delenv("LEMONADE_JUDGE_MODEL", raising=False)

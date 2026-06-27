@@ -38,32 +38,63 @@ class JudgeResult:
     rationale: str = ""
 
 
-def _parse_judge_response(content: str) -> JudgeResult:
-    """Parse a judge LLM reply into a clipped ``JudgeResult``."""
-    text = (content or "").strip()
-    if not text:
-        return JudgeResult(0.0, "empty judge response")
+_SCORE_RE = re.compile(r'"score"\s*:\s*(-?\d+(?:\.\d+)?)')
+_RATIONALE_RE = re.compile(r'"rationale"\s*:\s*"([^"]*)')
 
+
+def _strip_code_fence(text: str) -> str:
+    """Remove a leading ```/```json fence (chat models often wrap JSON)."""
+    if not text.startswith("```"):
+        return text
+    body = text[3:]
+    nl = body.find("\n")
+    if nl != -1 and body[:nl].strip().lower() in ("", "json"):
+        body = body[nl + 1 :]
+    return body.split("```", 1)[0].strip()
+
+
+def _parse_judge_response(content: str) -> JudgeResult:
+    """Parse a judge LLM reply into a clipped ``JudgeResult``.
+
+    Tolerant of markdown code fences and of replies truncated by the token cap
+    before the closing brace (the score field is emitted before the rationale,
+    so a regex fallback recovers it even from unclosed JSON).
+    """
+    raw = (content or "").strip()
+    if not raw:
+        return JudgeResult(0.0, "empty judge response")
+    text = _strip_code_fence(raw)
+
+    data = None
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
         match = _JSON_OBJECT_RE.search(text)
-        if match is None:
-            return JudgeResult(0.0, f"unparseable judge response: {text[:120]}")
+        if match is not None:
+            try:
+                data = json.loads(match.group(0))
+            except json.JSONDecodeError:
+                data = None
+
+    if isinstance(data, dict) and "score" in data:
         try:
-            data = json.loads(match.group(0))
-        except json.JSONDecodeError:
-            return JudgeResult(0.0, f"unparseable judge response: {text[:120]}")
+            score = float(data["score"])
+        except (TypeError, ValueError):
+            score = None
+        if score is not None:
+            rationale = data.get("rationale", "")
+            if not isinstance(rationale, str):
+                rationale = str(rationale)
+            return JudgeResult(float(np.clip(score, 0.0, 1.0)), rationale)
 
-    try:
-        score = float(data["score"])
-    except (KeyError, TypeError, ValueError):
-        return JudgeResult(0.0, f"missing score in judge response: {text[:120]}")
+    score_match = _SCORE_RE.search(text)
+    if score_match is not None:
+        score = float(score_match.group(1))
+        rationale_match = _RATIONALE_RE.search(text)
+        rationale = rationale_match.group(1) if rationale_match else ""
+        return JudgeResult(float(np.clip(score, 0.0, 1.0)), rationale)
 
-    rationale = data.get("rationale", "")
-    if not isinstance(rationale, str):
-        rationale = str(rationale)
-    return JudgeResult(float(np.clip(score, 0.0, 1.0)), rationale)
+    return JudgeResult(0.0, f"unparseable judge response: {text[:120]}")
 
 
 def _judge_user_message(prompt: str, output: str) -> str:
