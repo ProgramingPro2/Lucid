@@ -1,0 +1,46 @@
+{
+  "artifacts_dir": "artifacts/austen_ablate_none",
+  "codec": {
+    "kind": "jepa",
+    "device": "auto"
+  },
+  "data": {
+    "corpus_path": "data/austen_corpus.txt",
+    "context_len": 8
+  },
+  "predictor": {
+    "d_model": 512,
+    "n_layers": 6,
+    "n_heads": 8,
+    "max_seq_len": 64,
+    "dropout": 0.1
+  },
+  "jepa": {
+    "dim": 512,
+    "tokenizer": "gpt2",
+    "max_tokens": 48,
+    "enc_layers": 6,
+    "enc_heads": 8,
+    "dec_layers": 6,
+    "dec_heads": 8,
+    "d_model": 512,
+    "dropout": 0.1,
+    "recon_warmup_epochs": 12,
+    "alpha_warmup_epochs": 12,
+    "alpha_max": 1.0,
+    "ema_momentum": 0.0,
+    "var_weight": 0.0,
+    "cov_weight": 0.0,
+    "var_margin": 1.0,
+    "uniformity_weight": 0.0,
+    "collapse_std_threshold": 0.1,
+    "batch_size": 8,
+    "lr": 3e-4,
+    "epochs": 35,
+    "grad_clip": 1.0,
+    "context_len": 8,
+    "val_fraction": 0.1,
+    "patience": 0,
+    "seed": 0
+  }
+}
