@@ -44,6 +44,13 @@ class LoopReport:
         return len(r) >= 2 and r[-1] > r[0]
 
 
+@dataclass
+class ConditionedPrompt:
+    instruction_vecs: np.ndarray  # (Ni, dim)
+    theme_vec: np.ndarray | None = None
+    text: str = ""
+
+
 def _trajectories_to_dataset(
     trajectories: list[np.ndarray], context_len: int
 ) -> ConceptSequenceDataset:
@@ -152,5 +159,109 @@ def run_self_improvement(
                     model=model,
                     progress=progress,
                 )
+
+    return model, report
+
+
+def _ft_cfg(train_cfg: TrainConfig, loop_cfg: LoopConfig, n: int, seed: int) -> TrainConfig:
+    return TrainConfig(
+        batch_size=train_cfg.batch_size,
+        lr=train_cfg.lr * 0.5,
+        weight_decay=train_cfg.weight_decay,
+        epochs=loop_cfg.finetune_epochs,
+        warmup_steps=0,
+        grad_clip=train_cfg.grad_clip,
+        val_fraction=0.0 if n < 4 else 0.1,
+        seed=seed,
+    )
+
+
+def run_conditioned_self_improvement(
+    model: ConceptPredictor,
+    codec: ConceptCodec,
+    prompts: list[ConditionedPrompt],
+    judge: Judge,
+    loop_cfg: LoopConfig,
+    predictor_cfg: PredictorConfig,
+    train_cfg: TrainConfig,
+    device: str = "cpu",
+    seed: int = 0,
+    progress: bool = True,
+) -> tuple[ConceptPredictor, LoopReport]:
+    """RAFT over instruction-conditioned rollouts (E10 alignment).
+
+    Mirrors :func:`run_self_improvement` but samples with ``generate_conditioned``
+    (instruction prefix + optional theme) and fine-tunes the conditioned
+    predictor on the reward-ranked (instruction -> response) pairs. The
+    continuation loop above is unchanged.
+    """
+    from ..data.instruction import InstructionConceptDataset, InstructionPair
+    from ..generate.rollout import generate_conditioned
+    from ..predictor.train_conditioned import train_conditioned
+
+    rng = np.random.default_rng(seed)
+    report = LoopReport()
+
+    for iteration in range(loop_cfg.iterations):
+        log_stage(
+            f"improve-conditioned: iteration {iteration + 1}/{loop_cfg.iterations}",
+            enabled=progress,
+        )
+        items: list[float] = []
+        kept_pairs: list[InstructionPair] = []
+        best_text, best_reward = "", float("-inf")
+
+        for prompt in iter_bar(
+            prompts, desc="rollouts", total=len(prompts), enabled=progress, unit="prompt"
+        ):
+            scored: list[tuple[float, np.ndarray]] = []
+            for _ in range(loop_cfg.rollouts_per_prompt):
+                roll = generate_conditioned(
+                    model,
+                    prompt.instruction_vecs,
+                    steps=loop_cfg.rollout_steps,
+                    theme_vec=prompt.theme_vec,
+                    temperature=0.15,
+                    device=device,
+                    rng=rng,
+                )
+                text = " ".join(rollout_to_text(roll, codec))
+                reward = judge.score(prompt.text, text, roll.generated_vectors).score
+                scored.append((reward, roll.generated_vectors))
+                items.append(reward)
+                if reward > best_reward:
+                    best_reward, best_text = reward, text
+
+            scored.sort(key=lambda x: x[0], reverse=True)
+            keep_n = max(1, int(len(scored) * loop_cfg.keep_fraction))
+            for _, resp_vecs in scored[:keep_n]:
+                if resp_vecs.shape[0] >= 1:
+                    kept_pairs.append(
+                        InstructionPair(
+                            instruction_vecs=prompt.instruction_vecs,
+                            response_vecs=resp_vecs,
+                            theme_vec=prompt.theme_vec,
+                        )
+                    )
+
+        mean_reward = float(np.mean(items)) if items else 0.0
+        report.mean_reward_per_iter.append(mean_reward)
+        report.kept_per_iter.append(len(kept_pairs))
+        report.best_samples.append(best_text)
+        log_stage(
+            f"improve-conditioned: mean_reward={mean_reward:.3f} kept={len(kept_pairs)}",
+            enabled=progress,
+        )
+
+        if len(kept_pairs) >= 2:
+            ds = InstructionConceptDataset(kept_pairs)
+            model, _ = train_conditioned(
+                ds,
+                predictor_cfg,
+                _ft_cfg(train_cfg, loop_cfg, len(ds), seed),
+                device=device,
+                model=model,
+                progress=progress,
+            )
 
     return model, report

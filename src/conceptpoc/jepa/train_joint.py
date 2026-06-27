@@ -16,6 +16,7 @@ from torch.utils.data import DataLoader, random_split
 
 from ..config import JepaConfig, PredictorConfig
 from ..data.corpus import Document
+from ..gpu_gate import GpuGate
 from ..progress import iter_bar, log_epoch, log_stage
 from .dataset import JepaWindowDataset, make_collate
 from .joint_model import JointJepa
@@ -80,6 +81,7 @@ def train_joint(
     device: str = "auto",
     tokenizer: Tokenizer | None = None,
     progress: bool = True,
+    gate: GpuGate | None = None,
 ) -> tuple[JointJepa, Tokenizer, JointHistory]:
     torch.manual_seed(cfg.seed)
     dev = _device(device)
@@ -141,6 +143,8 @@ def train_joint(
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
             opt.step()
             model.update_ema()
+            if gate is not None:
+                gate.step(model, opt)
 
             agg["total"] += out.total.item()
             agg["recon"] += out.recon.item()

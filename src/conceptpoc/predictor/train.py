@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader, random_split
 
 from ..config import PredictorConfig, TrainConfig
 from ..data.dataset import ConceptSequenceDataset, collate_sequences
+from ..gpu_gate import GpuGate
 from ..progress import iter_bar, log_epoch
 from .model import ConceptPredictor, predictor_loss
 
@@ -35,6 +36,7 @@ def train_predictor(
     device: str = "auto",
     model: ConceptPredictor | None = None,
     progress: bool = True,
+    gate: GpuGate | None = None,
 ) -> tuple[ConceptPredictor, TrainHistory]:
     torch.manual_seed(train_cfg.seed)
     dev = _device(device)
@@ -92,6 +94,8 @@ def train_predictor(
             torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip)
             opt.step()
             sched.step()
+            if gate is not None:
+                gate.step(model, opt)
             epoch_loss += loss.total.item()
         history.train_loss.append(epoch_loss / max(1, len(train_dl)))
 
