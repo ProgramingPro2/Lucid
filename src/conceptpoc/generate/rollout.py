@@ -43,15 +43,26 @@ def _predict_next(
     segment_ids: torch.Tensor | None = None,
     theme_vec: torch.Tensor | None = None,
     temperature: float = 0.0,
+    cfg_scale: float | None = None,
 ) -> torch.Tensor:
-    """One next-vector step; dispatches regression vs diffusion sampling."""
+    """One next-vector step; dispatches regression vs diffusion sampling.
+
+    ``cfg_scale`` overrides the model's built-in CFG scale for diffusion
+    predictors (useful for A/B testing guidance strength without reloading).
+    """
     if _is_diffusion_model(model):
-        return model.sample(
+        if cfg_scale is not None:
+            orig_scale = model.diff_cfg.cfg_scale
+            model.diff_cfg.cfg_scale = cfg_scale
+        result = model.sample(
             ctx,
             segment_ids=segment_ids,
             theme_vec=theme_vec,
             temperature=temperature,
         )
+        if cfg_scale is not None:
+            model.diff_cfg.cfg_scale = orig_scale
+        return result
     pred = model(ctx, segment_ids=segment_ids, theme_vec=theme_vec)
     if temperature > 0:
         pred = pred + torch.randn_like(pred) * temperature
