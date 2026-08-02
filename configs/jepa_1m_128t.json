@@ -1,0 +1,56 @@
+{
+  "artifacts_dir": "artifacts/jepa_1m_128t",
+  "codec": {
+    "kind": "jepa",
+    "device": "auto"
+  },
+  "data": {
+    "corpus_path": "data/corpus_1m.txt",
+    "context_len": 16
+  },
+  "predictor": {
+    "d_model": 512,
+    "n_layers": 8,
+    "n_heads": 8,
+    "max_seq_len": 64,
+    "dropout": 0.1
+  },
+  "jepa": {
+    "dim": 512,
+    "tokenizer": "gpt2",
+    "max_tokens": 128,
+    "enc_layers": 8,
+    "enc_heads": 8,
+    "dec_layers": 8,
+    "dec_heads": 8,
+    "d_model": 512,
+    "dropout": 0.1,
+    "recon_warmup_epochs": 4,
+    "alpha_warmup_epochs": 4,
+    "alpha_max": 1.0,
+    "ema_momentum": 0.99,
+    "var_weight": 1.0,
+    "cov_weight": 0.04,
+    "var_margin": 1.0,
+    "uniformity_weight": 1.0,
+    "collapse_std_threshold": 0.1,
+    "batch_size": 16,
+    "lr": 3e-4,
+    "epochs": 20,
+    "grad_clip": 1.0,
+    "context_len": 16,
+    "val_fraction": 0.05,
+    "patience": 0,
+    "seed": 42
+  },
+  "loop": {
+    "rollouts_per_prompt": 8,
+    "keep_fraction": 0.25,
+    "rollout_steps": 6,
+    "iterations": 3,
+    "finetune_epochs": 2
+  },
+  "gpu_gate": {
+    "enabled": false
+  }
+}
