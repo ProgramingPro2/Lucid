@@ -11,13 +11,14 @@ from pathlib import Path
 
 from .codec import build_codec
 from .config import Config
-from .persistence import load_decoder_bank, load_predictor
+from .persistence import load_decoder_bank, load_diffusion_predictor, load_predictor
 
 
 def artifact_paths(cfg: Config) -> dict[str, Path]:
     a = cfg.artifacts_dir
     return {
         "predictor": a / "predictor.pt",
+        "predictor_diffusion": a / "predictor_diffusion.pt",
         "conditioned_predictor": a / "predictor_conditioned.pt",
         "bank": a / "decoder_bank.npz",
         "metrics": a / "metrics.json",
@@ -71,10 +72,19 @@ def build_codec_with_bank(cfg: Config, fit_texts: list[str] | None):
 def codec_and_predictor(cfg: Config, fit_texts: list[str] | None):
     """Return ``(codec, predictor)``.
 
-    For ``kind == 'jepa'`` the predictor is the jointly-trained one carried by
-    the codec; otherwise it is loaded from ``predictor.pt``.
+    For ``kind == 'jepa'`` the default predictor is the jointly-trained one on
+    the codec unless ``predictor.head == 'diffusion'``, in which case the
+    separately trained diffusion checkpoint is loaded. Non-jepa codecs always
+    load ``predictor.pt``.
     """
     codec = build_codec_with_bank(cfg, fit_texts)
+    if cfg.predictor.head == "diffusion":
+        path = artifact_paths(cfg)["predictor_diffusion"]
+        if not path.exists():
+            raise FileNotFoundError(
+                f"no diffusion predictor at {path}; run 'train-diffusion' first"
+            )
+        return codec, load_diffusion_predictor(path)
     if is_jepa(cfg):
         return codec, codec.predictor
     return codec, load_predictor(artifact_paths(cfg)["predictor"])

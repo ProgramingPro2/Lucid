@@ -28,6 +28,7 @@ from ..generate.rollout import (
 )
 from ..predictor.model import ConceptPredictor
 from ..reward.judge import Judge
+from .latent import latent_diagnostics
 
 _WORD_RE = re.compile(r"[a-z0-9']+")
 _SENT_RE = re.compile(r"(?<=[.!?])\s+")
@@ -149,13 +150,18 @@ def _generate_conditioned(
     return text, lines, roll.generated_vectors
 
 
-def _diagnostics(text: str, lines: list[str]) -> dict:
+def _diagnostics(
+    text: str, lines: list[str], gen_vecs: np.ndarray, bank: np.ndarray | None
+) -> dict:
     sentences = lines or [s for s in _SENT_RE.split(text.strip()) if s]
-    return {
+    diag = {
         "distinct_2": round(distinct_2(text), 4),
         "verbatim_repeat_rate": round(verbatim_repeat_rate(sentences), 4),
         "sentence_count": len(sentences),
     }
+    if bank is not None and len(bank) > 0:
+        diag.update(latent_diagnostics(gen_vecs, bank))
+    return diag
 
 
 def _model_device(model: ConceptPredictor) -> str:
@@ -173,6 +179,7 @@ def run_eval(
     steps: int = 6,
     device: str | None = None,
     conditioned: bool = False,
+    bank_vectors: np.ndarray | None = None,
 ) -> list[ItemResult]:
     """Generate + score every item. Pure and deterministic for greedy rollout.
 
@@ -199,7 +206,7 @@ def run_eval(
                 text=text,
                 score=float(verdict.score),
                 rationale=verdict.rationale,
-                diagnostics=_diagnostics(text, lines),
+                diagnostics=_diagnostics(text, lines, gen_vecs, bank_vectors),
             )
         )
     return results
@@ -230,6 +237,15 @@ def aggregate(results: list[ItemResult]) -> dict:
                 _mean([float(r.diagnostics["sentence_count"]) for r in group]), 4
             ),
         }
+        latent_keys = ("mean_max_cos_to_bank", "mean_consecutive_cos")
+        for key in latent_keys:
+            vals = [
+                r.diagnostics[key]
+                for r in group
+                if key in r.diagnostics and r.diagnostics[key] == r.diagnostics[key]
+            ]
+            if vals:
+                summary[key] = round(_mean(vals), 4)
         if humans:
             summary["mean_human_score"] = round(_mean(humans), 4)
         return summary
@@ -270,10 +286,16 @@ def format_summary(report: dict) -> str:
         human = ""
         if "mean_human_score" in s:
             human = f"  human={s['mean_human_score']:.3f}"
+        latent = ""
+        if "mean_max_cos_to_bank" in s:
+            latent = (
+                f"  bank={s['mean_max_cos_to_bank']:.3f}"
+                f"  seq={s.get('mean_consecutive_cos', float('nan')):.3f}"
+            )
         lines.append(
             f"  {cap:<22}{s['n']:>4}{s['mean_score']:>9.3f}"
             f"{s['mean_distinct_2']:>11.3f}{s['mean_verbatim_repeat_rate']:>9.3f}"
-            f"{s['mean_sentence_count']:>8.2f}{human}"
+            f"{s['mean_sentence_count']:>8.2f}{human}{latent}"
         )
     return "\n".join(lines)
 
@@ -298,6 +320,7 @@ def run_harness(
     config_label: str | None = None,
     progress: bool = True,
     conditioned: bool = False,
+    bank_vectors: np.ndarray | None = None,
 ) -> tuple[list[ItemResult], dict]:
     """Config-driven entry point: load codec+predictor, eval, build report.
 
@@ -306,17 +329,37 @@ def run_harness(
     generated with conditioning; otherwise the model's continuation predictor is
     used exactly as before.
     """
+    from ..data.cache import EmbeddingCache
+    from ..data.corpus import load_documents
     from ..loader import codec_and_conditioned_predictor, codec_and_predictor
 
     items = load_eval_set(eval_path)
     if not items:
         raise ValueError(f"no eval items found at {eval_path}")
+    bank = bank_vectors
+    if bank is None and getattr(cfg.eval, "compute_latent_diagnostics", True):
+        docs = load_documents(cfg.data.corpus_path)
+        codec_for_cache = codec_and_predictor(cfg, None)[0]
+        cache = EmbeddingCache(cfg.artifacts_dir / "cache")
+        codec_id = f"{cfg.codec.kind}:{cfg.codec.model_name}"
+        corpus = cache.build(
+            docs, codec_for_cache, codec_id, progress=False
+        )
+        bank = corpus.vectors
     # Fit texts only matter for retrieval codecs; the jepa codec ignores them.
     if conditioned:
         codec, model = codec_and_conditioned_predictor(cfg, None)
     else:
         codec, model = codec_and_predictor(cfg, None)
-    results = run_eval(items, codec, model, judge, steps=steps, conditioned=conditioned)
+    results = run_eval(
+        items,
+        codec,
+        model,
+        judge,
+        steps=steps,
+        conditioned=conditioned,
+        bank_vectors=bank,
+    )
     report = build_report(
         results, steps=steps, judge_backend=judge_backend, config=config_label
     )

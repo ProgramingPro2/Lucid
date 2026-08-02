@@ -40,30 +40,44 @@ class JudgeResult:
 
 _SCORE_RE = re.compile(r'"score"\s*:\s*(-?\d+(?:\.\d+)?)')
 _RATIONALE_RE = re.compile(r'"rationale"\s*:\s*"([^"]*)')
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 
-def _strip_code_fence(text: str) -> str:
-    """Remove a leading ```/```json fence (chat models often wrap JSON)."""
-    if not text.startswith("```"):
-        return text
-    body = text[3:]
-    nl = body.find("\n")
-    if nl != -1 and body[:nl].strip().lower() in ("", "json"):
-        body = body[nl + 1 :]
-    return body.split("```", 1)[0].strip()
+def _normalize_score(value: float) -> float:
+    """Clip to [0, 1], accepting either a 0-1 (requested) or a 0-5 rating.
+
+    Values in (2, 5] are read as a 0-5 scale and rescaled; small overshoots
+    (<= 2) are treated as 0-1 and simply clipped, so a stray 1.5 stays 1.0.
+    """
+    if 2.0 < value <= 5.0:
+        value = value / 5.0
+    return float(np.clip(value, 0.0, 1.0))
+
+
+def _strip_wrappers(text: str) -> str:
+    """Remove reasoning ``<think>`` blocks and a leading ```/```json fence."""
+    text = _THINK_RE.sub("", text).strip()
+    if text.startswith("```"):
+        body = text[3:]
+        nl = body.find("\n")
+        if nl != -1 and body[:nl].strip().lower() in ("", "json"):
+            body = body[nl + 1 :]
+        text = body.split("```", 1)[0].strip()
+    return text
 
 
 def _parse_judge_response(content: str) -> JudgeResult:
     """Parse a judge LLM reply into a clipped ``JudgeResult``.
 
-    Tolerant of markdown code fences and of replies truncated by the token cap
-    before the closing brace (the score field is emitted before the rationale,
-    so a regex fallback recovers it even from unclosed JSON).
+    Tolerant of reasoning ``<think>`` blocks, markdown code fences, a 0-5 rating
+    scale, and replies truncated by the token cap before the closing brace (the
+    score field is emitted before the rationale, so a regex fallback recovers it
+    even from unclosed JSON).
     """
     raw = (content or "").strip()
     if not raw:
         return JudgeResult(0.0, "empty judge response")
-    text = _strip_code_fence(raw)
+    text = _strip_wrappers(raw)
 
     data = None
     try:
@@ -85,14 +99,14 @@ def _parse_judge_response(content: str) -> JudgeResult:
             rationale = data.get("rationale", "")
             if not isinstance(rationale, str):
                 rationale = str(rationale)
-            return JudgeResult(float(np.clip(score, 0.0, 1.0)), rationale)
+            return JudgeResult(_normalize_score(score), rationale)
 
     score_match = _SCORE_RE.search(text)
     if score_match is not None:
         score = float(score_match.group(1))
         rationale_match = _RATIONALE_RE.search(text)
         rationale = rationale_match.group(1) if rationale_match else ""
-        return JudgeResult(float(np.clip(score, 0.0, 1.0)), rationale)
+        return JudgeResult(_normalize_score(score), rationale)
 
     return JudgeResult(0.0, f"unparseable judge response: {text[:120]}")
 
@@ -183,16 +197,30 @@ class LemonadeJudge(Judge):
             raise ValueError("LEMONADE_JUDGE_MODEL must be set when JUDGE_BACKEND=lemonade")
         self._warned_parse_failure = False
 
-    def score(self, prompt: str, output: str, vectors: np.ndarray | None = None) -> JudgeResult:
-        resp = self._client.chat.completions.create(
+    def _create(self, prompt: str, output: str, *, json_mode: bool):
+        kwargs = dict(
             model=self._model,
             messages=[
                 {"role": "system", "content": _JUDGE_SYSTEM_PROMPT},
                 {"role": "user", "content": _judge_user_message(prompt, output)},
             ],
             temperature=0.0,
-            max_completion_tokens=256,
+            # Headroom so reasoning-capable judges finish any preamble AND emit
+            # the closing brace; a tight cap truncates good-text replies to empty
+            # content, silently scoring them 0.0.
+            max_completion_tokens=512,
         )
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+        return self._client.chat.completions.create(**kwargs)
+
+    def score(self, prompt: str, output: str, vectors: np.ndarray | None = None) -> JudgeResult:
+        # Constrained JSON output is the most reliable (no code fences / prose);
+        # fall back to a plain call once if a server rejects response_format.
+        try:
+            resp = self._create(prompt, output, json_mode=True)
+        except Exception:  # noqa: BLE001 - server may not support response_format
+            resp = self._create(prompt, output, json_mode=False)
         result = _parse_judge_response(resp.choices[0].message.content or "")
         if result.score == 0.0 and result.rationale.startswith("unparseable"):
             if not self._warned_parse_failure:

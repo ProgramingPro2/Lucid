@@ -61,6 +61,28 @@ def test_parse_judge_response_truncated_unclosed():
     assert result.rationale.startswith("Partially relevant")
 
 
+def test_parse_judge_response_strips_think_block():
+    text = (
+        "<think>The text rambles but is on-topic.</think>\n"
+        '{"score": 0.5, "rationale": "ok"}'
+    )
+    result = _parse_judge_response(text)
+    assert result.score == 0.5
+    assert result.rationale == "ok"
+
+
+def test_parse_judge_response_rescales_0_to_5_scale():
+    # A clear 0-5 rating is rescaled; a small overshoot stays clipped to 1.0.
+    assert _parse_judge_response('{"score": 4, "rationale": "good"}').score == 0.8
+    assert _parse_judge_response('{"score": 1.5, "rationale": "high"}').score == 1.0
+
+
+def test_parse_judge_response_empty_is_unparseable():
+    result = _parse_judge_response("")
+    assert result.score == 0.0
+    assert "empty" in result.rationale
+
+
 def test_build_judge_explicit_backends(monkeypatch):
     monkeypatch.delenv("JUDGE_BACKEND", raising=False)
     monkeypatch.delenv("LEMONADE_JUDGE_MODEL", raising=False)
@@ -108,8 +130,10 @@ def test_lemonade_judge_score_mocked(monkeypatch):
     kwargs = mock_client.chat.completions.create.call_args.kwargs
     assert kwargs["model"] == "user.Flow-Judge"
     assert kwargs["temperature"] == 0.0
-    assert kwargs["max_completion_tokens"] == 256
-    assert "response_format" not in kwargs
+    # Headroom for reasoning-capable judges to finish the JSON; JSON mode keeps
+    # the reply free of code fences / prose for reliable parsing.
+    assert kwargs["max_completion_tokens"] == 512
+    assert kwargs["response_format"] == {"type": "json_object"}
 
 
 def test_heuristic_judge_prefers_varied_text():

@@ -6,7 +6,8 @@ resulting trajectory of vectors is then decoded to text by the codec.
 
 Diversity for sampling N candidates (needed by the self-improvement loop) comes
 from Gaussian noise injected in concept space before re-normalizing, controlled
-by ``temperature``.
+by ``temperature``. Diffusion predictors sample stochastically via reverse
+diffusion; ``temperature`` adds extra jitter after sampling.
 """
 from __future__ import annotations
 
@@ -27,6 +28,35 @@ class Rollout:
     @property
     def all_vectors(self) -> np.ndarray:
         return np.concatenate([self.seed_vectors, self.generated_vectors], axis=0)
+
+
+def _is_diffusion_model(model) -> bool:
+    return getattr(model.cfg, "head", "regression") == "diffusion" or hasattr(
+        model, "diff_cfg"
+    )
+
+
+def _predict_next(
+    model,
+    ctx: torch.Tensor,
+    *,
+    segment_ids: torch.Tensor | None = None,
+    theme_vec: torch.Tensor | None = None,
+    temperature: float = 0.0,
+) -> torch.Tensor:
+    """One next-vector step; dispatches regression vs diffusion sampling."""
+    if _is_diffusion_model(model):
+        return model.sample(
+            ctx,
+            segment_ids=segment_ids,
+            theme_vec=theme_vec,
+            temperature=temperature,
+        )
+    pred = model(ctx, segment_ids=segment_ids, theme_vec=theme_vec)
+    if temperature > 0:
+        pred = pred + torch.randn_like(pred) * temperature
+        pred = torch.nn.functional.normalize(pred, dim=-1)
+    return pred
 
 
 @torch.no_grad()
@@ -54,12 +84,7 @@ def generate_rollout(
     for _ in range(steps):
         window = np.stack(context[-max_context:])
         ctx = torch.from_numpy(window).unsqueeze(0).to(dev)
-        pred = model(ctx).squeeze(0).cpu().numpy()
-        if temperature > 0:
-            pred = pred + rng.normal(0.0, temperature, size=pred.shape).astype(
-                np.float32
-            )
-            pred = ConceptCodec.normalize(pred)
+        pred = _predict_next(model, ctx, temperature=temperature).squeeze(0).cpu().numpy()
         context.append(pred)
         generated.append(pred)
 
@@ -84,8 +109,10 @@ def generate_conditioned(
 
     The instruction vectors form a segment-0 prefix; each generated response
     vector is appended as segment 1 and fed back in. Greedy (``temperature=0``)
-    generation is deterministic. Returns a ``Rollout`` whose ``seed_vectors``
-    are the instruction and ``generated_vectors`` are the response.
+    generation is deterministic for regression; diffusion models remain
+    stochastic unless temperature is 0 and sampling is deterministic DDIM.
+    Returns a ``Rollout`` whose ``seed_vectors`` are the instruction and
+    ``generated_vectors`` are the response.
     """
     model.eval()
     dev = torch.device(device) if isinstance(device, str) else device
@@ -109,8 +136,6 @@ def generate_conditioned(
     for _ in range(steps):
         window = np.stack(context[-max_context:])
         ctx = torch.from_numpy(window).unsqueeze(0).to(dev)
-        # Segment id 0 for instruction positions still inside the window, 1 for
-        # already-generated response positions.
         n_resp_in_window = len(generated[-max_context:]) if generated else 0
         n_instr_in_window = window.shape[0] - n_resp_in_window
         seg = torch.cat(
@@ -120,16 +145,17 @@ def generate_conditioned(
             ]
         ).unsqueeze(0).to(dev)
         pred = (
-            model(ctx, segment_ids=seg, theme_vec=theme_t)
+            _predict_next(
+                model,
+                ctx,
+                segment_ids=seg,
+                theme_vec=theme_t,
+                temperature=temperature,
+            )
             .squeeze(0)
             .cpu()
             .numpy()
         )
-        if temperature > 0:
-            pred = pred + rng.normal(0.0, temperature, size=pred.shape).astype(
-                np.float32
-            )
-            pred = ConceptCodec.normalize(pred)
         context.append(pred)
         generated.append(pred)
 

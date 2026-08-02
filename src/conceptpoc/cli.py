@@ -9,6 +9,8 @@ Subcommands:
   improve     run the reward-ranked self-improvement loop
   build-instructions  build + cache conditioned instruction concept pairs (E10)
   train-conditioned   train the segment/theme-conditioned predictor (E10)
+  train-diffusion   train a concept-space diffusion predictor (replaces regression)
+  train-decoder-robust  decoder fine-tune on predicted/perturbed vectors (contingency)
 
 Run with: python -m conceptpoc.cli <subcommand> [--config config.json]
 """
@@ -34,6 +36,7 @@ from .loader import (
 )
 from .persistence import (
     save_decoder_bank,
+    save_diffusion_predictor,
     save_joint,
     save_predictor,
     write_json,
@@ -84,6 +87,73 @@ def cmd_train(cfg: Config, *, progress: bool = True) -> None:
         else f"final val cosine={history.val_cosine[-1]:.3f}"
     )
     print(f"trained predictor ({model.num_parameters():,} params); {best}")
+
+
+def cmd_train_diffusion(cfg: Config, *, progress: bool = True) -> None:
+    cfg.ensure_dirs()
+    cfg.predictor.head = "diffusion"
+    docs = load_documents(
+        cfg.data.corpus_path, cfg.data.min_sentence_chars, cfg.data.max_sentence_chars
+    )
+    codec = _build_codec_with_bank(cfg, [s for d in docs for s in d.sentences])
+    cache = EmbeddingCache(cfg.artifacts_dir / "cache")
+    codec_id = f"{cfg.codec.kind}:{cfg.codec.model_name}"
+    corpus = cache.build(docs, codec, codec_id, progress=progress)
+    dataset = ConceptSequenceDataset(corpus, context_len=cfg.data.context_len)
+
+    from .predictor.train_diffusion import train_diffusion_predictor
+
+    model, history = train_diffusion_predictor(
+        dataset,
+        cfg.predictor,
+        cfg.train,
+        progress=progress,
+        gate=_build_gate(cfg, progress=progress),
+    )
+    out = _paths(cfg)["predictor_diffusion"]
+    save_diffusion_predictor(out, model)
+    best = (
+        f"best val sample cosine={history.best_val_sample_cosine:.3f} "
+        f"(epoch {history.best_epoch})"
+        if history.best_epoch > 0
+        else f"final val sample cosine={history.val_sample_cosine[-1]:.3f}"
+    )
+    print(f"trained diffusion predictor ({model.num_parameters():,} params); {best}")
+    print(f"saved to {out}")
+
+
+def cmd_train_decoder_robust(cfg: Config, *, progress: bool = True) -> None:
+    """Decoder-only robustness fine-tune (contingency for off-manifold samples)."""
+    cfg.ensure_dirs()
+    docs = load_documents(
+        cfg.data.corpus_path, cfg.data.min_sentence_chars, cfg.data.max_sentence_chars
+    )
+    _ensure_jepa_checkpoint(cfg)
+    from .jepa.train_decoder_robust import train_decoder_robust
+    from .persistence import load_diffusion_predictor, load_joint, save_joint
+
+    joint_path = Path(cfg.codec.jepa_checkpoint or cfg.artifacts_dir / "jepa" / "joint.pt")
+    model, tokenizer = load_joint(joint_path)
+    diffusion = None
+    diff_path = _paths(cfg)["predictor_diffusion"]
+    if diff_path.exists():
+        diffusion = load_diffusion_predictor(diff_path)
+    model, history = train_decoder_robust(
+        model,
+        tokenizer,
+        docs,
+        cfg.jepa,
+        cfg.decoder_robust,
+        diffusion=diffusion,
+        progress=progress,
+        gate=_build_gate(cfg, progress=progress),
+    )
+    out = cfg.artifacts_dir / "jepa" / "joint_robust.pt"
+    save_joint(out, model, cfg.jepa.tokenizer)
+    print(
+        f"decoder-robust fine-tune done; final recon_acc={history.recon_acc[-1]:.3f}; "
+        f"saved to {out}"
+    )
 
 
 def _build_gate(cfg: Config, *, progress: bool):
@@ -663,6 +733,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("prepare", parents=[common])
     sub.add_parser("train", parents=[common])
+    sub.add_parser("train-diffusion", parents=[common])
+    sub.add_parser("train-decoder-robust", parents=[common])
     sub.add_parser("train-joint", parents=[common])
     sub.add_parser("eval", parents=[common])
     g = sub.add_parser("generate", parents=[common])
@@ -728,6 +800,10 @@ def main(argv: list[str] | None = None) -> None:
         cmd_prepare(cfg, progress=progress)
     elif args.command == "train":
         cmd_train(cfg, progress=progress)
+    elif args.command == "train-diffusion":
+        cmd_train_diffusion(cfg, progress=progress)
+    elif args.command == "train-decoder-robust":
+        cmd_train_decoder_robust(cfg, progress=progress)
     elif args.command == "train-joint":
         cmd_train_joint(cfg, progress=progress)
     elif args.command == "eval":
