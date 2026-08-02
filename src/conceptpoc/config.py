@@ -39,6 +39,37 @@ class CodecConfig:
 
 
 @dataclass
+class DecoderRobustConfig:
+    """Contingency decoder fine-tune on predicted/perturbed concept vectors."""
+
+    epochs: int = 3
+    batch_size: int = 16
+    lr: float = 1e-4
+    perturb_sigma: float = 0.08
+    scheduled_sampling_start: float = 0.0
+    scheduled_sampling_end: float = 0.5
+    sampling_steps: int = 15
+
+
+@dataclass
+class DiffusionConfig:
+    """Concept-space conditional diffusion head (replaces point regression)."""
+
+    num_train_timesteps: int = 100
+    beta_start: float = 1e-4
+    beta_end: float = 0.02
+    # "epsilon" (predict noise) or "x0" (predict clean vector).
+    predict_type: str = "epsilon"
+    sampler: str = "ddim"
+    sampling_steps: int = 30
+    head_hidden: int = 1024
+    head_layers: int = 3
+    time_dim: int = 128
+    # Optional extra Gaussian jitter after sampling (maps to rollout temperature).
+    sample_jitter: float = 0.0
+
+
+@dataclass
 class PredictorConfig:
     d_model: int = 512
     n_layers: int = 6
@@ -46,6 +77,8 @@ class PredictorConfig:
     ff_mult: int = 4
     dropout: float = 0.1
     max_seq_len: int = 64
+    # "regression" (legacy MSE+cosine point estimate) or "diffusion".
+    head: str = "regression"
     # Loss weighting between MSE and (1 - cosine) on the predicted next vector.
     cosine_weight: float = 1.0
     mse_weight: float = 1.0
@@ -54,6 +87,7 @@ class PredictorConfig:
     # 1=response) and/or a theme-vector projection added to every position.
     use_segment_embedding: bool = False
     use_theme: bool = False
+    diffusion: DiffusionConfig = field(default_factory=DiffusionConfig)
 
 
 @dataclass
@@ -207,6 +241,9 @@ class EvalConfig:
     rollout_steps: int = 6
     output_dir: str = "eval"
     rating_app_url: str = "http://localhost:8000"
+    # When True, ``run_harness`` loads cached corpus vectors and reports
+    # manifold-proximity / collapse metrics alongside judge scores.
+    compute_latent_diagnostics: bool = True
 
 
 @dataclass
@@ -259,6 +296,9 @@ class Config:
     gpu_gate: GpuGateConfig = field(default_factory=GpuGateConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
     instruction: InstructionConfig = field(default_factory=InstructionConfig)
+    # Diffusion head hyperparameters (also nested under predictor.diffusion).
+    diffusion: DiffusionConfig = field(default_factory=DiffusionConfig)
+    decoder_robust: DecoderRobustConfig = field(default_factory=DecoderRobustConfig)
 
     @classmethod
     def load(cls, path: str | os.PathLike | None = None) -> "Config":

@@ -1,0 +1,53 @@
+{
+  "artifacts_dir": "artifacts/austen_diffusion",
+  "codec": {
+    "kind": "jepa",
+    "device": "auto",
+    "jepa_checkpoint": "artifacts/austen_diffusion/jepa/joint_robust.pt"
+  },
+  "data": {
+    "corpus_path": "data/austen_corpus.txt",
+    "context_len": 8
+  },
+  "predictor": {
+    "head": "diffusion",
+    "d_model": 512,
+    "n_layers": 6,
+    "n_heads": 8,
+    "max_seq_len": 64,
+    "dropout": 0.1,
+    "diffusion": {
+      "num_train_timesteps": 100,
+      "sampling_steps": 20,
+      "head_hidden": 1024,
+      "head_layers": 3
+    }
+  },
+  "train": {
+    "batch_size": 32,
+    "lr": 0.0003,
+    "epochs": 4,
+    "val_fraction": 0.1,
+    "seed": 0
+  },
+  "jepa": {
+    "dim": 512,
+    "tokenizer": "gpt2",
+    "max_tokens": 48,
+    "context_len": 8
+  },
+  "decoder_robust": {
+    "epochs": 2,
+    "batch_size": 8,
+    "lr": 0.0001,
+    "perturb_sigma": 0.08,
+    "scheduled_sampling_end": 0.4,
+    "sampling_steps": 15
+  },
+  "eval": {
+    "eval_path": "data/eval",
+    "rollout_steps": 6,
+    "output_dir": "eval_diffusion",
+    "compute_latent_diagnostics": true
+  }
+}

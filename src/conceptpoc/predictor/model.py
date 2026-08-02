@@ -34,16 +34,8 @@ class _PositionalEncoding(nn.Module):
         return x + self.pe[:, : x.size(1)]
 
 
-class ConceptPredictor(nn.Module):
-    """Causal transformer over concept vectors.
-
-    Optional conditioning (E10), enabled per-field via ``PredictorConfig`` and
-    fully backward compatible: when no ``segment_ids``/``theme_vec`` are passed
-    the extra modules contribute nothing, so ``forward`` returns exactly the
-    same output as before. A learned segment embedding distinguishes
-    instruction (0) from response (1) positions, and an optional global theme
-    vector is added to every position.
-    """
+class ContextTransformer(nn.Module):
+    """Shared causal transformer trunk over concept-vector sequences."""
 
     def __init__(self, concept_dim: int, cfg: PredictorConfig) -> None:
         super().__init__()
@@ -51,8 +43,6 @@ class ConceptPredictor(nn.Module):
         self.cfg = cfg
         self.in_proj = nn.Linear(concept_dim, cfg.d_model)
         self.pos = _PositionalEncoding(cfg.d_model, cfg.max_seq_len)
-        # Conditioning modules are created only when enabled so existing
-        # checkpoints (trained without them) still load with a strict state_dict.
         self.segment_emb = (
             nn.Embedding(2, cfg.d_model) if cfg.use_segment_embedding else None
         )
@@ -72,7 +62,68 @@ class ConceptPredictor(nn.Module):
             layer, num_layers=cfg.n_layers, enable_nested_tensor=False
         )
         self.norm = nn.LayerNorm(cfg.d_model)
+
+    def forward(
+        self,
+        context: torch.Tensor,
+        pad_mask: torch.Tensor | None = None,
+        *,
+        segment_ids: torch.Tensor | None = None,
+        theme_vec: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Return per-position hidden states (B, T, d_model)."""
+        seq_len = context.size(1)
+        causal = torch.triu(
+            torch.ones(seq_len, seq_len, dtype=torch.bool, device=context.device),
+            diagonal=1,
+        )
+        h = self.in_proj(context)
+        if segment_ids is not None and self.segment_emb is not None:
+            h = h + self.segment_emb(segment_ids)
+        if theme_vec is not None and self.theme_proj is not None:
+            h = h + self.theme_proj(theme_vec).unsqueeze(1)
+        h = self.pos(h)
+        h = self.encoder(h, mask=causal, src_key_padding_mask=pad_mask)
+        return self.norm(h)
+
+    @staticmethod
+    def last_real_token(
+        h: torch.Tensor, pad_mask: torch.Tensor | None
+    ) -> torch.Tensor:
+        if pad_mask is None:
+            return h[:, -1]
+        lengths = (~pad_mask).sum(dim=1)
+        idx = (lengths - 1).clamp_min(0)
+        return h[torch.arange(h.size(0), device=h.device), idx]
+
+
+class ConceptPredictor(nn.Module):
+    """Causal transformer over concept vectors (point-regression head).
+
+    Optional conditioning (E10), enabled per-field via ``PredictorConfig`` and
+    fully backward compatible: when no ``segment_ids``/``theme_vec`` are passed
+    the extra modules contribute nothing, so ``forward`` returns exactly the
+    same output as before. A learned segment embedding distinguishes
+    instruction (0) from response (1) positions, and an optional global theme
+    vector is added to every position.
+    """
+
+    def __init__(self, concept_dim: int, cfg: PredictorConfig) -> None:
+        super().__init__()
+        self.concept_dim = concept_dim
+        self.cfg = cfg
+        self.trunk = ContextTransformer(concept_dim, cfg)
         self.out_proj = nn.Linear(cfg.d_model, concept_dim)
+
+    def encode_context(
+        self,
+        context: torch.Tensor,
+        pad_mask: torch.Tensor | None = None,
+        *,
+        segment_ids: torch.Tensor | None = None,
+        theme_vec: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.trunk(context, pad_mask, segment_ids=segment_ids, theme_vec=theme_vec)
 
     def forward(
         self,
@@ -94,24 +145,12 @@ class ConceptPredictor(nn.Module):
         ``return_sequence`` returns a per-position prediction (B, T, dim)
         instead of only the last real token; used by teacher-forced training.
         """
-        seq_len = context.size(1)
-        # Boolean causal mask (True = disallowed) keeps the mask type consistent
-        # with the boolean key-padding mask.
-        causal = torch.triu(
-            torch.ones(seq_len, seq_len, dtype=torch.bool, device=context.device),
-            diagonal=1,
+        h = self.encode_context(
+            context, pad_mask, segment_ids=segment_ids, theme_vec=theme_vec
         )
-        h = self.in_proj(context)
-        if segment_ids is not None and self.segment_emb is not None:
-            h = h + self.segment_emb(segment_ids)
-        if theme_vec is not None and self.theme_proj is not None:
-            h = h + self.theme_proj(theme_vec).unsqueeze(1)
-        h = self.pos(h)
-        h = self.encoder(h, mask=causal, src_key_padding_mask=pad_mask)
-        h = self.norm(h)
         if return_sequence:
             return F.normalize(self.out_proj(h), dim=-1)
-        last = self._last_real_token(h, pad_mask)
+        last = ContextTransformer.last_real_token(h, pad_mask)
         pred = self.out_proj(last)
         return F.normalize(pred, dim=-1)
 
@@ -119,15 +158,20 @@ class ConceptPredictor(nn.Module):
     def _last_real_token(
         h: torch.Tensor, pad_mask: torch.Tensor | None
     ) -> torch.Tensor:
-        if pad_mask is None:
-            return h[:, -1]
-        # Right-padded: last real index is (number of real tokens) - 1.
-        lengths = (~pad_mask).sum(dim=1)
-        idx = (lengths - 1).clamp_min(0)
-        return h[torch.arange(h.size(0), device=h.device), idx]
+        return ContextTransformer.last_real_token(h, pad_mask)
 
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters())
+
+    @property
+    def segment_emb(self):
+        """Backward-compatible access to the trunk's segment embedding."""
+        return self.trunk.segment_emb
+
+    @property
+    def theme_proj(self):
+        """Backward-compatible access to the trunk's theme projection."""
+        return self.trunk.theme_proj
 
 
 @dataclass
@@ -148,3 +192,18 @@ def predictor_loss(
     cosine = (1.0 - F.cosine_similarity(pred, target, dim=-1)).mean()
     total = mse_weight * mse + cosine_weight * cosine
     return LossOutput(total=total, mse=mse, cosine=cosine)
+
+
+def remap_legacy_predictor_state(state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Map pre-trunk checkpoints (``in_proj.*``) to ``trunk.in_proj.*``."""
+    if not any(k.startswith("in_proj.") for k in state):
+        return state
+    if any(k.startswith("trunk.") for k in state):
+        return state
+    out: dict[str, torch.Tensor] = {}
+    for key, value in state.items():
+        if key.startswith("out_proj."):
+            out[key] = value
+        else:
+            out[f"trunk.{key}"] = value
+    return out
