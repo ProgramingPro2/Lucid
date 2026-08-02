@@ -43,7 +43,12 @@ class SinusoidalTimestepEmbedding(nn.Module):
 
 
 class DenoiseHead(nn.Module):
-    """MLP that predicts diffusion target from (x_noisy, context, timestep)."""
+    """MLP that predicts diffusion target from (x_noisy, context, timestep).
+
+    With ``use_film=True``, context is injected as scale+shift at every layer
+    instead of only concatenated at the input — a much stronger conditioning
+    signal that directly addresses the weak-context problem.
+    """
 
     def __init__(
         self,
@@ -52,13 +57,31 @@ class DenoiseHead(nn.Module):
         cfg: DiffusionConfig,
     ) -> None:
         super().__init__()
+        self.use_film = getattr(cfg, "use_film", False)
         self.time_emb = SinusoidalTimestepEmbedding(cfg.time_dim)
-        in_dim = concept_dim + context_dim + cfg.time_dim
+
+        if self.use_film:
+            # Input: [x_noisy, time_emb] (context injected per-layer via FiLM)
+            in_dim = concept_dim + cfg.time_dim
+            self.film_generators = nn.ModuleList()
+        else:
+            # Input: [x_noisy, context, time_emb] (original behavior)
+            in_dim = concept_dim + context_dim + cfg.time_dim
+
         layers: list[nn.Module] = []
         hidden = cfg.head_hidden
         d = in_dim
-        for _ in range(cfg.head_layers):
+        for i in range(cfg.head_layers):
             layers.extend([nn.Linear(d, hidden), nn.GELU(), nn.LayerNorm(hidden)])
+            if self.use_film:
+                # FiLM: generate scale+shift from context for each layer
+                self.film_generators.append(
+                    nn.Sequential(
+                        nn.Linear(context_dim, hidden),
+                        nn.GELU(),
+                        nn.Linear(hidden, hidden * 2),  # scale + shift
+                    )
+                )
             d = hidden
         layers.append(nn.Linear(d, concept_dim))
         self.net = nn.Sequential(*layers)
@@ -67,8 +90,23 @@ class DenoiseHead(nn.Module):
         self, x_noisy: torch.Tensor, t: torch.Tensor, context: torch.Tensor
     ) -> torch.Tensor:
         te = self.time_emb(t)
-        h = torch.cat([x_noisy, context, te], dim=-1)
-        return self.net(h)
+        if self.use_film:
+            h = torch.cat([x_noisy, te], dim=-1)
+            film_idx = 0
+            for module in self.net:
+                h = module(h)
+                # After each LayerNorm, apply FiLM from context
+                if isinstance(module, nn.LayerNorm) and film_idx < len(
+                    self.film_generators
+                ):
+                    film = self.film_generators[film_idx](context)
+                    scale, shift = film.chunk(2, dim=-1)
+                    h = h * (1.0 + scale) + shift
+                    film_idx += 1
+            return h
+        else:
+            h = torch.cat([x_noisy, context, te], dim=-1)
+            return self.net(h)
 
 
 class NoiseSchedule(nn.Module):
@@ -164,6 +202,10 @@ class DiffusionConceptPredictor(nn.Module):
         )
         return ContextTransformer.last_real_token(h, pad_mask)
 
+    def _null_context(self, batch_size: int, device: torch.device) -> torch.Tensor:
+        """Zero context embedding for unconditional CFG passes."""
+        return torch.zeros(batch_size, self.cfg.d_model, device=device)
+
     def _model_output(
         self,
         x_noisy: torch.Tensor,
@@ -181,10 +223,28 @@ class DiffusionConceptPredictor(nn.Module):
         segment_ids: torch.Tensor | None = None,
         theme_vec: torch.Tensor | None = None,
     ) -> DiffusionLossOutput:
-        """Denoising MSE conditioned on the prefix's last real position."""
+        """Denoising MSE conditioned on the prefix's last real position.
+
+        With ``cfg_drop_prob > 0``, randomly replaces context with zeros during
+        training so the model learns both conditional and unconditional
+        denoising (needed for classifier-free guidance at inference).
+        """
         c = self.encode_context(
             context, pad_mask, segment_ids=segment_ids, theme_vec=theme_vec
         )
+        # CFG: randomly drop context during training
+        if (
+            self.diff_cfg.cfg_drop_prob > 0
+            and self.training
+            and c.size(0) > 0
+        ):
+            drop_mask = (
+                torch.rand(c.size(0), 1, device=c.device)
+                < self.diff_cfg.cfg_drop_prob
+            ).float()
+            null_c = self._null_context(c.size(0), c.device)
+            c = drop_mask * null_c + (1.0 - drop_mask) * c
+
         x0 = F.normalize(target, dim=-1)
         b = x0.size(0)
         t = torch.randint(
@@ -231,12 +291,24 @@ class DiffusionConceptPredictor(nn.Module):
         sampling_steps: int | None = None,
         temperature: float = 0.0,
     ) -> torch.Tensor:
-        """Reverse diffusion from Gaussian noise, conditioned on context."""
-        c = self.encode_context(
+        """Reverse diffusion from Gaussian noise, conditioned on context.
+
+        Uses classifier-free guidance when ``cfg_scale != 1.0`` and
+        ``cfg_drop_prob > 0``: combines conditional and unconditional
+        predictions to amplify the conditioning signal.
+        """
+        c_cond = self.encode_context(
             context, pad_mask, segment_ids=segment_ids, theme_vec=theme_vec
         )
-        b, device = c.size(0), c.device
+        b, device = c_cond.size(0), c_cond.device
         steps = sampling_steps or self.diff_cfg.sampling_steps
+
+        c_uncond = self._null_context(b, device)
+        use_cfg = (
+            self.diff_cfg.cfg_scale != 1.0
+            and self.diff_cfg.cfg_drop_prob > 0
+        )
+
         x = torch.randn(b, self.concept_dim, device=device)
 
         if self.diff_cfg.sampler == "ddim":
@@ -254,12 +326,32 @@ class DiffusionConceptPredictor(nn.Module):
                     else torch.zeros((), device=device, dtype=torch.long)
                 )
                 t_prev_b = torch.full((b,), t_prev.item(), device=device, dtype=torch.long)
-                out = self._model_output(x, t, c)
-                x = self.schedule.ddim_step(x, t, t_prev_b, out, self.diff_cfg.predict_type)
+
+                if use_cfg:
+                    out_cond = self._model_output(x, t, c_cond)
+                    out_uncond = self._model_output(x, t, c_uncond)
+                    out = out_uncond + self.diff_cfg.cfg_scale * (
+                        out_cond - out_uncond
+                    )
+                else:
+                    out = self._model_output(x, t, c_cond)
+
+                x = self.schedule.ddim_step(
+                    x, t, t_prev_b, out, self.diff_cfg.predict_type
+                )
         else:
             for t_val in reversed(range(self.schedule.num_train_timesteps)):
                 t = torch.full((b,), t_val, device=device, dtype=torch.long)
-                out = self._model_output(x, t, c)
+
+                if use_cfg:
+                    out_cond = self._model_output(x, t, c_cond)
+                    out_uncond = self._model_output(x, t, c_uncond)
+                    out = out_uncond + self.diff_cfg.cfg_scale * (
+                        out_cond - out_uncond
+                    )
+                else:
+                    out = self._model_output(x, t, c_cond)
+
                 x0 = self.schedule.predict_x0_from_output(
                     x, t, out, self.diff_cfg.predict_type
                 )

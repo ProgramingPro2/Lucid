@@ -67,6 +67,13 @@ class DiffusionConfig:
     time_dim: int = 128
     # Optional extra Gaussian jitter after sampling (maps to rollout temperature).
     sample_jitter: float = 0.0
+    # Classifier-free guidance: probability of dropping context during training.
+    cfg_drop_prob: float = 0.1
+    # Guidance scale at inference (>1 amplifies conditioning signal).
+    cfg_scale: float = 3.0
+    # FiLM conditioning: inject context as scale+shift at every layer instead of
+    # only concatenating at the input. Much stronger conditioning signal.
+    use_film: bool = False
 
 
 @dataclass
