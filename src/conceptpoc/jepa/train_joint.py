@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader, random_split
@@ -82,6 +83,8 @@ def train_joint(
     tokenizer: Tokenizer | None = None,
     progress: bool = True,
     gate: GpuGate | None = None,
+    db_path: str | Path | None = None,
+    corpus_path: str | None = None,
 ) -> tuple[JointJepa, Tokenizer, JointHistory]:
     torch.manual_seed(cfg.seed)
     dev = _device(device)
@@ -120,7 +123,60 @@ def train_joint(
     history = JointHistory()
     best_state: dict | None = None
     epochs_no_improve = 0
-    for epoch in range(cfg.epochs):
+
+    # --- SQLite checkpoint resume (optional) ---
+    db = None
+    run_id = None
+    start_epoch = 0
+    if db_path is not None:
+        from ..ckpt_db import CheckpointDB
+
+        db = CheckpointDB(db_path)
+        run_id = db.latest_run() if not corpus_path else None
+        corpus_used = corpus_path or (str(docs[0].source) if docs else "?")
+        if run_id is None or (corpus_path and db.get_run(run_id) is not None):
+            # New run (or reuse existing run row matching this corpus).
+            existing = db.latest_run()
+            if existing is not None:
+                run_id = existing
+            else:
+                run_id = db.start_run(
+                    corpus_used, tokenizer.name, cfg.seed,
+                    cfg.max_tokens, cfg.context_len, {"jepa": cfg.__dict__},
+                )
+        # Try to resume from the latest weight snapshot.
+        loaded = db.load_latest_checkpoint(run_id, dev)
+        if loaded is not None:
+            model_state, opt_state, ckpt_epoch = loaded
+            model.load_state_dict(model_state)
+            opt.load_state_dict(opt_state)
+            start_epoch = ckpt_epoch + 1
+            # Restore history so metrics are continuous.
+            for m in db.epoch_metrics(run_id):
+                ep = m["epoch"]
+                for key, attr in (
+                    ("total", "total"), ("recon", "recon"), ("pred", "pred"),
+                    ("recon_acc", "recon_acc"), ("std_z", "std_z"),
+                    ("aniso", "aniso"), ("alpha", "alpha"),
+                    ("val_pred_cos", "val_pred_cos"),
+                ):
+                    if key in m:
+                        getattr(history, attr).append(m[key])
+            if progress:
+                log_stage(
+                    f"resumed run {run_id} from epoch {ckpt_epoch+1}/{cfg.epochs} "
+                    f"({db.path.name})",
+                    enabled=True,
+                )
+        else:
+            if progress:
+                log_stage(
+                    f"new run {run_id} (no checkpoint to resume): "
+                    f"starting from epoch 1/{cfg.epochs}",
+                    enabled=True,
+                )
+
+    for epoch in range(start_epoch, cfg.epochs):
         alpha = _alpha_for_epoch(epoch, cfg)
         model.train()
         agg = {"total": 0.0, "recon": 0.0, "pred": 0.0, "acc": 0.0, "std": 0.0, "aniso": 0.0}
@@ -202,6 +258,23 @@ def train_joint(
                 "recon_warmup_epochs.",
                 enabled=True,
             )
+        # Persist metrics + weight snapshot to SQLite so a crash costs <=1 epoch.
+        if db is not None:
+            db.record_epoch(
+                run_id,
+                epoch,
+                {
+                    "total": history.total[-1],
+                    "recon": history.recon[-1],
+                    "pred": history.pred[-1],
+                    "recon_acc": history.recon_acc[-1],
+                    "std_z": history.std_z[-1],
+                    "aniso": history.aniso[-1],
+                    "alpha": alpha,
+                    "val_pred_cos": val_cos,
+                },
+            )
+            db.save_checkpoint(run_id, epoch, model, opt)
         if cfg.patience > 0 and alpha >= cfg.alpha_max and epochs_no_improve >= cfg.patience:
             log_stage(
                 f"early stop: no val improvement for {cfg.patience} epochs "
@@ -221,6 +294,8 @@ def train_joint(
         )
 
     history.collapsed = bool(history.std_z[-1] < cfg.collapse_std_threshold)
+    if db is not None:
+        db.close()
     return model, tokenizer, history
 
 
