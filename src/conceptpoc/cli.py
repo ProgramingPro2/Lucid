@@ -187,7 +187,13 @@ def cmd_train_joint(cfg: Config, *, progress: bool = True) -> None:
     from .jepa.train_joint import train_joint
 
     model, _, history = train_joint(
-        docs, cfg.jepa, cfg.predictor, progress=progress, gate=_build_gate(cfg, progress=progress)
+        docs,
+        cfg.jepa,
+        cfg.predictor,
+        progress=progress,
+        gate=_build_gate(cfg, progress=progress),
+        db_path=cfg.artifacts_dir / "train.db",
+        corpus_path=str(cfg.data.corpus_path),
     )
     ckpt = cfg.artifacts_dir / "jepa" / "joint.pt"
     save_joint(ckpt, model, cfg.jepa.tokenizer)
