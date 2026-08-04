@@ -1,0 +1,32 @@
+{
+  "artifacts_dir": "artifacts/writer_p1",
+  "data": {
+    "corpus_path": "data/corpus_1m.txt"
+  },
+  "jepa": {
+    "tokenizer": "gpt2",
+    "dim": 512
+  },
+  "writer": {
+    "dim": 768,
+    "n_layers": 12,
+    "n_heads": 12,
+    "ff_mult": 4,
+    "seq_len": 256,
+    "batch_size": 8,
+    "lr": 3e-4,
+    "lr2": 1e-4,
+    "epochs": 10,
+    "steps_per_epoch": 3000,
+    "gradient_acc": 8,
+    "db_path": "artifacts/writer_p1/train.db",
+    "run_id": 0,
+    "use_concept": false,
+    "seed": 42
+  },
+  "gpu_gate": {
+    "enabled": true,
+    "foreign_util_pct": 40.0,
+    "resume_util_pct": 20.0
+  }
+}
