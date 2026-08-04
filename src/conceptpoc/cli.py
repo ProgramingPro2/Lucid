@@ -612,6 +612,54 @@ def _resolve_out_dir(cfg: Config, override: str | None) -> Path:
     return p if p.is_absolute() else cfg.artifacts_dir / p
 
 
+def cmd_writer_pretrain(cfg: Config, *, progress: bool = True) -> None:
+    """Phase-1: pretrain the fluent writer as a next-token LM."""
+    from .writer.train_phase1 import train_phase1
+    from .persistence import save_writer
+
+    model, tok = train_phase1(cfg, progress=progress)
+    out = cfg.artifacts_dir / "writer_p1.pt"
+    save_writer(
+        out,
+        model,
+        {
+            "vocab_size": tok.vocab_size,
+            "dim": cfg.writer.dim,
+            "n_layers": cfg.writer.n_layers,
+            "n_heads": cfg.writer.n_heads,
+            "ff_mult": cfg.writer.ff_mult,
+            "max_seq_len": cfg.writer.seq_len + 8,
+            "concept_dim": cfg.jepa.dim,
+            "use_concept": False,
+        },
+    )
+    print(f"writer phase-1 done; {model.num_parameters():,} params; saved to {out}")
+
+
+def cmd_writer_condition(cfg: Config, *, progress: bool = True) -> None:
+    """Phase-2: condition the writer on JEPA concept vectors."""
+    from .writer.train_phase2 import train_phase2
+    from .persistence import save_writer
+
+    model, tok = train_phase2(cfg, progress=progress)
+    out = cfg.artifacts_dir / "writer_cond.pt"
+    save_writer(
+        out,
+        model,
+        {
+            "vocab_size": tok.vocab_size,
+            "dim": cfg.writer.dim,
+            "n_layers": cfg.writer.n_layers,
+            "n_heads": cfg.writer.n_heads,
+            "ff_mult": cfg.writer.ff_mult,
+            "max_seq_len": cfg.writer.seq_len + 8,
+            "concept_dim": cfg.jepa.dim,
+            "use_concept": True,
+        },
+    )
+    print(f"writer phase-2 done; {model.num_parameters():,} params; saved to {out}")
+
+
 def cmd_eval_harness(cfg: Config, args, *, progress: bool = True) -> None:
     import os
 
@@ -761,6 +809,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub.add_parser("build-instructions", parents=[common])
     sub.add_parser("train-conditioned", parents=[common])
+    sub.add_parser("writer-pretrain", parents=[common])
+    sub.add_parser("writer-condition", parents=[common])
 
     eh = sub.add_parser("eval-harness", parents=[common])
     eh.add_argument(
@@ -827,6 +877,10 @@ def main(argv: list[str] | None = None) -> None:
         cmd_build_instructions(cfg, progress=progress)
     elif args.command == "train-conditioned":
         cmd_train_conditioned(cfg, progress=progress)
+    elif args.command == "writer-pretrain":
+        cmd_writer_pretrain(cfg, progress=progress)
+    elif args.command == "writer-condition":
+        cmd_writer_condition(cfg, progress=progress)
     elif args.command == "eval-harness":
         cmd_eval_harness(cfg, args, progress=progress)
 
