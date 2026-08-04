@@ -109,6 +109,7 @@ def cmd_train_diffusion(cfg: Config, *, progress: bool = True) -> None:
         cfg.train,
         progress=progress,
         gate=_build_gate(cfg, progress=progress),
+        db_path=cfg.artifacts_dir / "train.db",
     )
     out = _paths(cfg)["predictor_diffusion"]
     save_diffusion_predictor(out, model)
