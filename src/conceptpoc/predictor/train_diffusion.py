@@ -107,10 +107,15 @@ def train_diffusion_predictor(
         db = CheckpointDB(db_path)
         run_id = db.latest_run()
         if run_id is None:
+            from dataclasses import asdict
+
             run_id = db.start_run(
                 str(getattr(dataset, "corpus_path", "concept-seq")),
                 "gpt2", train_cfg.seed, 128, dataset.dim,
-                {"predictor": dict(predictor_cfg.__dict__), "train": dict(train_cfg.__dict__)},
+                {
+                    "predictor": asdict(predictor_cfg),
+                    "train": asdict(train_cfg),
+                },
             )
         loaded = db.load_latest_checkpoint(run_id, dev)
         if loaded is not None:
