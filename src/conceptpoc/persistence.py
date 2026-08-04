@@ -160,3 +160,24 @@ def load_joint(path: str | Path, device: str = "cpu"):
     model.to(device)
     model.eval()
     return model, tokenizer
+
+
+def save_writer(path: str | Path, model, config: dict) -> None:
+    """Save a trained FluWriter (hybrid writer head) + its config."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"state_dict": model.state_dict(), "config": config}, path)
+
+
+def load_writer(path: str | Path, device: str = "cpu"):
+    """Load a FluWriter + config from a checkpoint."""
+    from .writer import FluWriter
+
+    blob = torch.load(Path(path), map_location=device, weights_only=False)
+    cfg = blob["config"]
+    m = FluWriter(cfg["vocab_size"], **{k: v for k, v in cfg.items() if k != "vocab_size"})
+    m.load_state_dict(blob["state_dict"])
+    m.to(device)
+    m.eval()
+    return m
+
