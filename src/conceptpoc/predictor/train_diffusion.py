@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -11,7 +12,7 @@ from torch.utils.data import DataLoader, random_split
 from ..config import PredictorConfig, TrainConfig
 from ..data.dataset import ConceptSequenceDataset, collate_sequences
 from ..gpu_gate import GpuGate
-from ..progress import iter_bar, log_epoch
+from ..progress import iter_bar, log_epoch, log_stage
 from .diffusion import DiffusionConceptPredictor
 
 
@@ -57,6 +58,8 @@ def train_diffusion_predictor(
     model: DiffusionConceptPredictor | None = None,
     progress: bool = True,
     gate: GpuGate | None = None,
+    db_path: str | Path | None = None,
+    checkpoint_every: int = 1,
 ) -> tuple[DiffusionConceptPredictor, DiffusionTrainHistory]:
     torch.manual_seed(train_cfg.seed)
     dev = _device(device)
@@ -93,11 +96,48 @@ def train_diffusion_predictor(
         pct_start=min(0.3, train_cfg.warmup_steps / total_steps),
     )
 
+    # --- SQLite checkpoint resume (optional) ---
+    db = None
+    run_id = None
+    start_epoch = 0
+    history = DiffusionTrainHistory()
+    if db_path is not None:
+        from ..ckpt_db import CheckpointDB
+
+        db = CheckpointDB(db_path)
+        run_id = db.latest_run()
+        if run_id is None:
+            run_id = db.start_run(
+                str(getattr(dataset, "corpus_path", "concept-seq")),
+                "gpt2", train_cfg.seed, 128, dataset.dim,
+                {"predictor": dict(predictor_cfg.__dict__), "train": dict(train_cfg.__dict__)},
+            )
+        loaded = db.load_latest_checkpoint(run_id, dev)
+        if loaded is not None:
+            model_state, opt_state, ckpt_epoch = loaded
+            model.load_state_dict(model_state)
+            opt.load_state_dict(opt_state)
+            # leftover epochs for history are appended at save time
+            start_epoch = ckpt_epoch + 1
+            for m in db.epoch_metrics(run_id):
+                history.train_loss.append(m.get("train_loss", 0.0))
+                history.val_loss.append(m.get("val_loss", 0.0))
+                history.val_sample_cosine.append(m.get("val_sample_cosine", 0.0))
+            log_stage(
+                f"resumed diffusion run {run_id} from epoch {ckpt_epoch+1}/{train_cfg.epochs}",
+                enabled=True,
+            )
+        else:
+            log_stage(
+                f"new diffusion run {run_id}: starting epoch 1/{train_cfg.epochs}",
+                enabled=True,
+            )
+
     history = DiffusionTrainHistory()
     best_state: dict | None = None
     val_steps = min(10, predictor_cfg.diffusion.sampling_steps)
 
-    for epoch in range(train_cfg.epochs):
+    for epoch in range(start_epoch, train_cfg.epochs):
         model.train()
         epoch_loss = 0.0
         batch_iter = iter_bar(
@@ -144,8 +184,23 @@ def train_diffusion_predictor(
             enabled=progress,
         )
 
+        if db is not None and (epoch % checkpoint_every == 0 or epoch == train_cfg.epochs - 1):
+            db.record_epoch(
+                run_id,
+                epoch,
+                {
+                    "train_loss": history.train_loss[-1],
+                    "val_loss": val_loss,
+                    "val_sample_cosine": val_cos,
+                },
+            )
+            db.save_checkpoint(run_id, epoch, model, opt)
+
     if best_state is not None:
         model.load_state_dict(best_state)
+
+    if db is not None:
+        db.close()
 
     return model, history
 
