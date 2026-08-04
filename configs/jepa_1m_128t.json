@@ -51,6 +51,8 @@
     "finetune_epochs": 2
   },
   "gpu_gate": {
-    "enabled": false
+    "enabled": true,
+    "foreign_util_pct": 40.0,
+    "resume_util_pct": 20.0
   }
 }
