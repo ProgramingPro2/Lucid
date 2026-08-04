@@ -292,6 +292,35 @@ class GpuGateConfig:
 
 
 @dataclass
+class WriterConfig:
+    """Hybrid fluent-writer (GPT-2-scale) hyperparameters (see writer/).
+
+    Two-phase training: Phase 1 pretrains the writer as a plain next-token LM
+    (fluency); Phase 2 fine-tunes it conditioned on the JEPA concept vector so
+    it can be aimed at the intended next sentence.
+    """
+
+    dim: int = 768
+    n_layers: int = 12
+    n_heads: int = 12
+    ff_mult: int = 4
+    seq_len: int = 256
+    batch_size: int = 8
+    lr: float = 3e-4
+    lr2: float = 1e-4
+    epochs: int = 20
+    steps_per_epoch: int = 3000
+    gradient_acc: int = 8
+    # Path(s) to resume/for-checkpointing.
+    phase1_checkpoint: str = ""
+    jepa_checkpoint: str = ""
+    db_path: str = ""
+    run_id: int = 0
+    use_concept: bool = True
+    seed: int = 42
+
+
+@dataclass
 class Config:
     artifacts_dir: Path = field(default_factory=_default_artifacts_dir)
     codec: CodecConfig = field(default_factory=CodecConfig)
@@ -300,6 +329,7 @@ class Config:
     data: DataConfig = field(default_factory=DataConfig)
     loop: LoopConfig = field(default_factory=LoopConfig)
     jepa: JepaConfig = field(default_factory=JepaConfig)
+    writer: WriterConfig = field(default_factory=WriterConfig)
     gpu_gate: GpuGateConfig = field(default_factory=GpuGateConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
     instruction: InstructionConfig = field(default_factory=InstructionConfig)
