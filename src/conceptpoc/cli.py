@@ -312,6 +312,66 @@ def _conditioned_predictor_path(cfg: Config) -> Path:
     return cfg.artifacts_dir / "predictor_conditioned.pt"
 
 
+def cmd_generate_hybrid(cfg: Config, prompt: str, steps: int, writer_path: str | None = None) -> None:
+    """Hybrid generation: JEPA reasoner predicts next concept, writer renders it.
+
+    Flow:
+      1. Encode the prompt sentences into context concept vectors (JEPA encoder).
+      2. Diffusion predictor samples the NEXT concept vector from that context.
+      3. The fluent writer (GPT-2-scale) renders that vector into natural text.
+      Repeat for ``steps``.
+    """
+    import torch
+    import numpy as np
+
+    from .data.segment import segment_sentences
+    from .persistence import load_joint, load_diffusion_predictor, load_writer
+    from .codec.jepa_codec import JepaCodec
+    from .jepa.tokenizer import Tokenizer
+    from .generate.rollout import _predict_next
+
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # 1. Frozen JEPA reasoner: encoder (concepts) + diffusion predictor.
+    jepa_ckpt = cfg.writer.jepa_checkpoint or cfg.codec.jepa_checkpoint or \
+        str(cfg.artifacts_dir / "jepa" / "joint_robust.pt")
+    model, tok = load_joint(jepa_ckpt)
+    model.to(dev).eval()
+    codec = JepaCodec(model, tok, cfg.jepa.max_tokens, device=str(dev))
+    pred_path = cfg.artifacts_dir / "predictor_diffusion.pt"
+    predictor = load_diffusion_predictor(pred_path, device=str(dev))
+
+    # 2. Fluent writer (Phase-2 conditioned).
+    writer_path = writer_path or (cfg.artifacts_dir / "writer_cond.pt")
+    writer = load_writer(writer_path, device=str(dev))
+
+    # 3. Encode prompt to seed context.
+    seed_sents = segment_sentences(prompt) or [prompt]
+    seed_vecs = [codec.encode(seed_sents)]
+    import numpy as _np
+    context = [_np.asarray(v, dtype=_np.float32).reshape(1, -1)[0] for v in seed_vecs]
+
+    print("PROMPT:", prompt)
+    print("HYBRID CONTINUATION:")
+    for i in range(steps):
+        # Build context window for the predictor (last max_seq_len vectors).
+        window_v = _np.stack(context[-cfg.predictor.max_seq_len:])
+        ctx = torch.from_numpy(window_v).unsqueeze(0).to(dev)
+        pred = _predict_next(predictor, ctx).squeeze(0).cpu().numpy().reshape(1, -1)
+        # Render the predicted next-vector with the fluent writer.
+        concept = torch.from_numpy(pred[0]).unsqueeze(0).to(dev)
+        token_ids = writer.generate(
+            concept, max_tokens=cfg.jepa.max_tokens,
+            bos_id=tok.bos_id, eos_id=tok.eos_id, temperature=0.7, top_k=50,
+        )[0].tolist()
+        text = tok.decode(token_ids)
+        print("  -", text)
+        context.append(pred[0])
+
+
+
+
+
 def _load_conditioned_predictor(cfg: Config):
     from .persistence import load_predictor
 
@@ -801,6 +861,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--theme", default=None, help="optional theme vector for conditioned generation"
     )
     g.add_argument("--steps", type=int, default=6)
+    gh = sub.add_parser("generate-hybrid", parents=[common])
+    gh.add_argument("--prompt", required=True, help="continuation seed text")
+    gh.add_argument("--steps", type=int, default=6)
+    gh.add_argument("--writer", default=None, help="path to Phase-2 writer checkpoint")
     imp = sub.add_parser("improve", parents=[common])
     imp.add_argument(
         "--conditioned",
@@ -869,6 +933,8 @@ def main(argv: list[str] | None = None) -> None:
         if args.prompt is None and args.instruction is None:
             raise SystemExit("generate requires --prompt or --instruction")
         cmd_generate(cfg, args.prompt, args.steps, args.instruction, args.theme)
+    elif args.command == "generate-hybrid":
+        cmd_generate_hybrid(cfg, args.prompt, args.steps, args.writer)
     elif args.command == "improve":
         cmd_improve(
             cfg, conditioned=getattr(args, "conditioned", False), progress=progress
