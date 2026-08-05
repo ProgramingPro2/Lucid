@@ -371,6 +371,69 @@ def cmd_generate_hybrid(cfg: Config, prompt: str, steps: int, writer_path: str |
 
 
 
+def cmd_generate_trajectory(cfg: Config, prompt: str, rounds: int,
+                            writer_path: str | None = None,
+                            planner_path: str | None = None) -> None:
+    """Trajectory (plan-then-write) generation.
+
+    Flow:
+      1. Encode the prompt into context concept vectors (JEPA encoder).
+      2. Planner emits a K-vector *trajectory* in latent space (the plan).
+      3. Writer realizes each planned vector into a sentence; encoded sentence
+         feeds back into context for the next round.
+    The key difference vs one-step hybrid: the planner commits to a multi-step
+    direction *before* writing, so the whole passage should track one topic.
+    """
+    import torch
+    import numpy as np
+
+    from .data.segment import segment_sentences
+    from .persistence import load_joint, load_writer, load_planner
+    from .codec.jepa_codec import JepaCodec
+    from .jepa.tokenizer import Tokenizer
+
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    jepa_ckpt = cfg.writer.jepa_checkpoint or cfg.codec.jepa_checkpoint or \
+        str(cfg.artifacts_dir / "jepa" / "joint_robust.pt")
+    model, tok = load_joint(jepa_ckpt)
+    model.to(dev).eval()
+    codec = JepaCodec(model, tok, cfg.jepa.max_tokens, device=str(dev))
+
+    writer_path = writer_path or (cfg.artifacts_dir / "writer_cond.pt")
+    writer = load_writer(writer_path, device=str(dev))
+    planner_path = planner_path or (cfg.artifacts_dir / "planner.pt")
+    planner = load_planner(planner_path, device=str(dev))
+    C = planner.C
+    K = planner.K
+
+    # Build seed context from prompt sentences (pad up to C by repeating).
+    seed_sents = segment_sentences(prompt) or [prompt]
+    seed_vecs = [np.asarray(codec.encode(seed_sents), dtype=np.float32).reshape(-1)]
+    while len(seed_vecs) < C:
+        seed_vecs.append(seed_vecs[-1].copy())
+    context = seed_vecs[-C:]
+
+    print("PROMPT:", prompt)
+    print("TRAJECTORY CONTINUATION (planner plans ahead K per round):")
+    for _ in range(rounds):
+        # Planner sees the last C concept vectors and emits K future concepts.
+        window = torch.from_numpy(np.stack(context[-C:])).unsqueeze(0).to(dev)
+        traj = planner.plan(window).squeeze(0).cpu().numpy()  # (K, dim)
+        for v in traj:
+            concept = torch.from_numpy(v).unsqueeze(0).to(dev)
+            token_ids = writer.generate(
+                concept, max_tokens=cfg.jepa.max_tokens,
+                bos_id=tok.bos_id, eos_id=tok.eos_id, temperature=0.7, top_k=50,
+                top_p=0.9, repetition_penalty=1.3,
+            )[0].tolist()
+            text = tok.decode(token_ids)
+            print("  -", text)
+            # Feed the realized sentence back into context.
+            nv = np.asarray(codec.encode([text]), dtype=np.float32).reshape(-1)
+            context.append(nv)
+            if len(context) > C:
+                context.pop(0)
 
 
 def _load_conditioned_predictor(cfg: Config):
@@ -868,6 +931,11 @@ def build_parser() -> argparse.ArgumentParser:
     gh.add_argument("--prompt", required=True, help="continuation seed text")
     gh.add_argument("--steps", type=int, default=6)
     gh.add_argument("--writer", default=None, help="path to Phase-2 writer checkpoint")
+    gt = sub.add_parser("generate-trajectory", parents=[common])
+    gt.add_argument("--prompt", required=True, help="continuation seed text")
+    gt.add_argument("--rounds", type=int, default=2)
+    gt.add_argument("--writer", default=None, help="path to Phase-2 writer checkpoint")
+    gt.add_argument("--planner", default=None, help="path to trajectory planner checkpoint")
     imp = sub.add_parser("improve", parents=[common])
     imp.add_argument(
         "--conditioned",
@@ -937,7 +1005,10 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit("generate requires --prompt or --instruction")
         cmd_generate(cfg, args.prompt, args.steps, args.instruction, args.theme)
     elif args.command == "generate-hybrid":
-        cmd_generate_hybrid(cfg, args.prompt, args.steps, args.writer)
+        cmd_generate_hybrid(cfg, args.prompt, args.steps, writer_path=args.writer)
+    elif args.command == "generate-trajectory":
+        cmd_generate_trajectory(cfg, args.prompt, args.rounds,
+                                writer_path=args.writer, planner_path=args.planner)
     elif args.command == "improve":
         cmd_improve(
             cfg, conditioned=getattr(args, "conditioned", False), progress=progress
