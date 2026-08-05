@@ -114,3 +114,31 @@ def train_planner(cfg: Config, progress: bool = True) -> TrajectoryPlanner:
     if db is not None:
         db.close()
     return planner
+
+
+def main() -> None:
+    import argparse
+    import sys
+
+    from ..config import Config
+
+    ap = argparse.ArgumentParser(description="Train latent trajectory planner")
+    ap.add_argument("--config", default=None)
+    ap.add_argument("--out", default=None)
+    args = ap.parse_args()
+
+    cfg = Config.load(args.config)
+    planner = train_planner(cfg, progress=True)
+    import torch as _t
+    # Save the trained planner (fresh run always overwrites).
+    out = args.out or (cfg.artifacts_dir / "planner.pt")
+    out = str(out)
+    import os
+    os.makedirs(os.path.dirname(out), exist_ok=True) if os.path.dirname(out) else None
+    save_cfg = {**cfg.trajectory.__dict__, "dim": cfg.jepa.dim}
+    _t.save({"state_dict": planner.state_dict(), "config": save_cfg}, out)
+    print(f"[traj] planner saved to {out}")
+
+
+if __name__ == "__main__":
+    main()

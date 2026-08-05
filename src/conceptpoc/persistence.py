@@ -191,3 +191,31 @@ def load_writer(path: str | Path, device: str = "cpu"):
     m.eval()
     return m
 
+
+def save_planner(path: str | Path, model, config: dict) -> None:
+    """Save a trained TrajectoryPlanner."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"state_dict": model.state_dict(), "config": config}, path)
+
+
+def load_planner(path: str | Path, device: str = "cpu"):
+    """Load a TrajectoryPlanner."""
+    from .trajectory.planner import TrajectoryPlanner
+
+    dev = torch.device(device)
+    blob = torch.load(Path(path), map_location=device, weights_only=False)
+    cfg = blob["config"]
+    m = TrajectoryPlanner(
+        dim=cfg.get("dim", 512),
+        C=cfg.get("C", 8),
+        K=cfg.get("K", 5),
+        n_layers=cfg.get("n_layers", 4),
+        n_heads=cfg.get("n_heads", 8),
+        latent_iters=cfg.get("latent_iters", 3),
+    )
+    m.load_state_dict(blob["state_dict"])
+    m.to(dev)
+    m.eval()
+    return m
+
