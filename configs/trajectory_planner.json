@@ -1,0 +1,53 @@
+{
+  "artifacts_dir": "artifacts/trajectory_planner",
+  "codec": {
+    "kind": "jepa",
+    "device": "auto",
+    "jepa_checkpoint": "artifacts/jepa_v3_128t/jepa/joint_robust.pt"
+  },
+  "data": {
+    "corpus_path": "data/corpus_1m.txt",
+    "context_len": 32
+  },
+  "jepa": {
+    "dim": 512,
+    "tokenizer": "gpt2",
+    "max_tokens": 128,
+    "context_len": 32
+  },
+  "writer": {
+    "jepa_checkpoint": "artifacts/jepa_v3_128t/jepa/joint_robust.pt",
+    "phase1_checkpoint": "artifacts/writer_p1/writer_p1.pt",
+    "dim": 768,
+    "n_layers": 12,
+    "n_heads": 12,
+    "seq_len": 256,
+    "use_concept": true,
+    "use_film": true
+  },
+  "trajectory": {
+    "C": 8,
+    "K": 5,
+    "n_layers": 4,
+    "n_heads": 8,
+    "latent_iters": 3,
+    "epochs": 6,
+    "batch_size": 96,
+    "lr": 0.0003,
+    "max_docs": null,
+    "db_path": "artifacts/trajectory_planner/train.db",
+    "run_id": 0,
+    "seed": 42
+  },
+  "eval": {
+    "eval_path": "data/eval",
+    "rollout_steps": 6,
+    "output_dir": "eval_trajectory",
+    "compute_latent_diagnostics": true
+  },
+  "gpu_gate": {
+    "enabled": true,
+    "foreign_util_pct": 40.0,
+    "resume_util_pct": 20.0
+  }
+}

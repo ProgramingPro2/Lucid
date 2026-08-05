@@ -322,6 +322,28 @@ class WriterConfig:
 
 
 @dataclass
+class TrajectoryConfig:
+    """Latent trajectory planner hyperparameters (see trajectory/).
+
+    Planner predicts the next K concept vectors from a context window of C
+    vectors (multi-step latent planning), which the writer then realizes.
+    """
+
+    C: int = 8
+    K: int = 5
+    n_layers: int = 4
+    n_heads: int = 8
+    latent_iters: int = 3
+    epochs: int = 5
+    batch_size: int = 128
+    lr: float = 3e-4
+    max_docs: int | None = None
+    db_path: str = ""
+    run_id: int = 0
+    seed: int = 42
+
+
+@dataclass
 class Config:
     artifacts_dir: Path = field(default_factory=_default_artifacts_dir)
     codec: CodecConfig = field(default_factory=CodecConfig)
@@ -337,6 +359,7 @@ class Config:
     # Diffusion head hyperparameters (also nested under predictor.diffusion).
     diffusion: DiffusionConfig = field(default_factory=DiffusionConfig)
     decoder_robust: DecoderRobustConfig = field(default_factory=DecoderRobustConfig)
+    trajectory: TrajectoryConfig = field(default_factory=TrajectoryConfig)
 
     @classmethod
     def load(cls, path: str | os.PathLike | None = None) -> "Config":
