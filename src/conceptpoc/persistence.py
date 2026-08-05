@@ -175,7 +175,17 @@ def load_writer(path: str | Path, device: str = "cpu"):
 
     blob = torch.load(Path(path), map_location=device, weights_only=False)
     cfg = blob["config"]
-    m = FluWriter(cfg["vocab_size"], **{k: v for k, v in cfg.items() if k != "vocab_size"})
+    m = FluWriter(
+        cfg["vocab_size"],
+        dim=cfg.get("dim", 768),
+        n_layers=cfg.get("n_layers", 12),
+        n_heads=cfg.get("n_heads", 12),
+        ff_mult=cfg.get("ff_mult", 4),
+        max_seq_len=cfg.get("max_seq_len", 264),
+        concept_dim=cfg.get("concept_dim", 512),
+        use_concept=cfg.get("use_concept", True),
+        use_film=cfg.get("use_film", False),
+    )
     m.load_state_dict(blob["state_dict"])
     m.to(device)
     m.eval()

@@ -89,7 +89,8 @@ def train_phase2(
         ff_mult=cfg.writer.ff_mult,
         max_seq_len=cfg.writer.seq_len + 8,
         concept_dim=cfg.jepa.dim,
-        use_concept=True,
+        use_concept=cfg.writer.use_concept,
+        use_film=cfg.writer.use_film,
     )
     phase1_path = phase1_path or cfg.writer.phase1_checkpoint
     if phase1_path:

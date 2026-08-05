@@ -1,5 +1,5 @@
 {
-  "artifacts_dir": "artifacts/writer_p2",
+  "artifacts_dir": "artifacts/writer_p2_film",
   "codec": {
     "kind": "jepa",
     "device": "auto",
@@ -27,9 +27,10 @@
     "gradient_acc": 8,
     "phase1_checkpoint": "artifacts/writer_p1/writer_p1.pt",
     "jepa_checkpoint": "artifacts/jepa_v3_128t/jepa/joint_robust.pt",
-    "db_path": "artifacts/writer_p2/train.db",
+    "db_path": "artifacts/writer_p2_film/train.db",
     "run_id": 0,
     "use_concept": true,
+    "use_film": true,
     "seed": 42
   },
   "gpu_gate": {
