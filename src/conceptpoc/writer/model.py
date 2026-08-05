@@ -137,6 +137,10 @@ class FluWriter(nn.Module):
     ):
         """input_ids: (B, T); concept: (B, concept_dim) optional; returns logits or loss."""
         b, t = input_ids.shape
+        # Defensive: clamp any out-of-range / negative ids (corpus padding or
+        # masked-label artifacts) to valid embed indices. Never feed embed a
+        # value >= vocab_size or < 0 (that triggers a CUDA device-side assert).
+        input_ids = input_ids.clamp(0, self.vocab_size - 1)
         h = self.tok_embed(input_ids)
         if self.use_concept and concept is not None:
             c = self.concept_proj(concept).unsqueeze(1)  # (B, 1, dim)
