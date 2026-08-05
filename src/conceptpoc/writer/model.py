@@ -87,15 +87,29 @@ class SelfAttention(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, dim: int, n_heads: int, rope_len: int, ff_mult: int = 4, dropout: float = 0.0) -> None:
+    def __init__(self, dim: int, n_heads: int, rope_len: int, ff_mult: int = 4,
+                 dropout: float = 0.0, film_dim: int = 0) -> None:
         super().__init__()
         self.attn = SelfAttention(dim, n_heads, rope_len, dropout)
         self.ffn = SwiGLU(dim, dim * ff_mult)
         self.norm2 = RMSNorm(dim)
+        # FiLM (Feature-wise Linear Modulation): learn per-layer scale+shift from
+        # the concept vector so the topic signal is re-injected at EVERY layer.
+        # Without this, a single concept token placed at position 0 gets swamped
+        # by 256+ language tokens as it passes through deep attention stacks.
+        self.film = None
+        if film_dim:
+            self.film = nn.Linear(film_dim, 2 * dim, bias=False)
+            # Init to identity (gamma=1, beta=0) so FiLM starts as a no-op.
+            nn.init.zeros_(self.film.weight)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, concept: torch.Tensor | None = None) -> torch.Tensor:
         x = x + self.attn(x)
         x = x + self.ffn(self.norm2(x))
+        if self.film is not None and concept is not None:
+            gamma, beta = self.film(concept).unsqueeze(1).chunk(2, dim=-1)
+            gamma = 1.0 + gamma  # residual-scale init keeps identity at zero init
+            x = x * gamma + beta
         return x
 
 
@@ -112,15 +126,18 @@ class FluWriter(nn.Module):
         max_seq_len: int = 256,
         concept_dim: int = 512,
         use_concept: bool = True,
+        use_film: bool = False,
         dropout: float = 0.0,
     ) -> None:
         super().__init__()
         self.vocab_size = vocab_size
         self.dim = dim
         self.use_concept = use_concept
+        self.use_film = use_film
         self.tok_embed = nn.Embedding(vocab_size, dim)
+        film_dim = concept_dim if (use_concept and use_film) else 0
         self.blocks = nn.ModuleList(
-            [Block(dim, n_heads, max_seq_len + 8, ff_mult, dropout) for _ in range(n_layers)]
+            [Block(dim, n_heads, max_seq_len + 8, ff_mult, dropout, film_dim=film_dim) for _ in range(n_layers)]
         )
         self.norm_out = RMSNorm(dim)
         self.lm_head = nn.Linear(dim, vocab_size, bias=False)
@@ -148,8 +165,9 @@ class FluWriter(nn.Module):
         else:
             start = torch.zeros(b, 1, self.dim, device=input_ids.device)
             h = torch.cat([start, h], dim=1)
+        film_c = concept if (self.use_film and concept is not None) else None
         for blk in self.blocks:
-            h = blk(h)
+            h = blk(h, film_c)
         h = self.norm_out(h)
         logits = self.lm_head(h[:, 1:])  # (B, T, vocab)
         if labels is not None:
@@ -170,24 +188,47 @@ class FluWriter(nn.Module):
         eos_id: int | None = None,
         temperature: float = 0.8,
         top_k: int = 50,
+        top_p: float = 0.0,
+        repetition_penalty: float = 1.0,
     ) -> torch.Tensor:
-        """Sample token ids from a concept vector (Phase-2 conditioned decode)."""
+        """Sample token ids from a concept vector (Phase-2 conditioned decode).
+
+        ``repetition_penalty`` (>=1.0) divides the logits of tokens already
+        generated, suppressing repetition loops (Guan & Huang, arXiv:2307.01542).
+        ``top_p``>0 applies nucleus sampling after top-k.
+        """
         self.eval()
         dev = concept.device
         batch = concept.size(0)
         generated = torch.full((batch, 1), bos_id, dtype=torch.long, device=dev)
+        seen: list[torch.Tensor] = []
         for _ in range(max_tokens):
             logits = self.forward(generated, concept)[:, -1, :]
+            if repetition_penalty > 1.0 and seen:
+                pen = torch.cat(seen, dim=0)  # (n,) unique-ish tokens so far
+                # divide existing-token logits by penalty (>=1 => push down)
+                logits[:, pen] = torch.where(
+                    logits[:, pen] > 0,
+                    logits[:, pen] / repetition_penalty,
+                    logits[:, pen] * repetition_penalty,
+                )
             if temperature > 0:
                 logits = logits / temperature
                 if top_k > 0:
                     kth = logits.topk(min(top_k, logits.size(-1))).values[:, -1:]
                     logits = logits.masked_fill(logits < kth, float("-inf"))
+                if top_p and 0.0 < top_p < 1.0:
+                    sorted_logits, sorted_idx = torch.sort(logits, descending=True, dim=-1)
+                    cum = F.softmax(sorted_logits, dim=-1).cumsum(dim=-1)
+                    remove = cum - F.softmax(sorted_logits, dim=-1) >= top_p
+                    remove_orig = remove.gather(-1, sorted_idx.argsort(dim=-1))
+                    logits = logits.masked_fill(remove_orig, float("-inf"))
                 probs = F.softmax(logits, dim=-1)
                 nxt = torch.multinomial(probs, 1)
             else:
                 nxt = logits.argmax(dim=-1, keepdim=True)
             generated = torch.cat([generated, nxt], dim=1)
+            seen.append(nxt.reshape(-1))
             if eos_id is not None and (nxt == eos_id).all():
                 break
         return generated

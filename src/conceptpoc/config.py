@@ -317,6 +317,7 @@ class WriterConfig:
     db_path: str = ""
     run_id: int = 0
     use_concept: bool = True
+    use_film: bool = True
     seed: int = 42
 
 

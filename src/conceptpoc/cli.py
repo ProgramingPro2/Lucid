@@ -363,6 +363,7 @@ def cmd_generate_hybrid(cfg: Config, prompt: str, steps: int, writer_path: str |
         token_ids = writer.generate(
             concept, max_tokens=cfg.jepa.max_tokens,
             bos_id=tok.bos_id, eos_id=tok.eos_id, temperature=0.7, top_k=50,
+            top_p=0.9, repetition_penalty=1.3,
         )[0].tolist()
         text = tok.decode(token_ids)
         print("  -", text)
@@ -691,6 +692,7 @@ def cmd_writer_pretrain(cfg: Config, *, progress: bool = True) -> None:
             "max_seq_len": cfg.writer.seq_len + 8,
             "concept_dim": cfg.jepa.dim,
             "use_concept": False,
+            "use_film": False,
         },
     )
     print(f"writer phase-1 done; {model.num_parameters():,} params; saved to {out}")
@@ -714,7 +716,8 @@ def cmd_writer_condition(cfg: Config, *, progress: bool = True) -> None:
             "ff_mult": cfg.writer.ff_mult,
             "max_seq_len": cfg.writer.seq_len + 8,
             "concept_dim": cfg.jepa.dim,
-            "use_concept": True,
+            "use_concept": cfg.writer.use_concept,
+            "use_film": cfg.writer.use_film,
         },
     )
     print(f"writer phase-2 done; {model.num_parameters():,} params; saved to {out}")
