@@ -205,7 +205,7 @@ def load_planner(path: str | Path, device: str = "cpu"):
 
     dev = torch.device(device)
     blob = torch.load(Path(path), map_location=device, weights_only=False)
-    cfg = blob["config"]
+    cfg = blob.get("config") or blob.get("cfg", {})
     m = TrajectoryPlanner(
         dim=cfg.get("dim", 512),
         C=cfg.get("C", 8),
