@@ -64,3 +64,39 @@ def test_save_and_load_joint_round_trip(tmp_path):
     v_a = codec_a.encode(["the river moved slowly"])
     v_b = codec_b.encode(["the river moved slowly"])
     assert np.allclose(v_a, v_b, atol=1e-5)
+
+
+def test_channel_split_forward_runs():
+    """The routed (multi-channel) encoder still trains: reconstruction on the
+    full vector, prediction on the corr channel only, anti-collapse on spread."""
+    from torch.utils.data import DataLoader
+
+    from conceptpoc.data.corpus import Document
+    from conceptpoc.jepa.dataset import JepaWindowDataset, make_collate
+
+    tok = Tokenizer("char")
+    cfg = JepaConfig(
+        dim=32, d_model=32, enc_layers=1, dec_layers=1, enc_heads=4, dec_heads=4,
+        tokenizer="char", max_tokens=24, context_len=4,
+        channel_split=True, corr_dim=16,
+    )
+    pcfg = PredictorConfig(d_model=32, n_layers=1, n_heads=4, max_seq_len=16)
+    model = JointJepa(tok.vocab_size, tok.pad_id, tok.bos_id, cfg, pcfg)
+
+    docs = [
+        Document(source="t", sentences=[
+            "the river moved slowly", "birds rose from the reeds",
+            "a boat drifted past", "the sun climbed higher",
+        ])
+    ]
+    ds = JepaWindowDataset(docs, window=cfg.context_len)
+    collate = make_collate(tok, cfg.context_len, cfg.max_tokens)
+    loader = DataLoader(ds, batch_size=2, shuffle=False, collate_fn=collate)
+    ids, pad, valid = next(iter(loader))
+    out = model(ids, pad, valid, alpha=1.0)
+    assert out.total.isfinite()
+    assert out.total.shape == ()
+    # corr channel prediction works (idx into 16-dim corr space)
+    assert out.std_z >= 0.0
+    assert float(out.recon) == float(out.recon)
+

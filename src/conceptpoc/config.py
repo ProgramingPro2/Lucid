@@ -165,6 +165,13 @@ class JepaConfig:
     # this (collapse alarm). Healthy training pushes it toward var_margin.
     collapse_std_threshold: float = 0.1
 
+    # Multi-channel (routing) mode: when True, split the encoder output into a
+    # correlation channel (predictor operates here, forward-predictable) and a
+    # spread channel (anti-collapse operates here), so that anti-collapse no
+    # longer flattens forward predictability (the ~0.05 adjacent-cosine wall).
+    channel_split: bool = False
+    corr_dim: int = 256
+
     # Optimization.
     batch_size: int = 16
     lr: float = 3e-4

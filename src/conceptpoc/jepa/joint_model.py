@@ -70,7 +70,9 @@ class JointJepa(nn.Module):
         self.encoder = TextEncoder(vocab_size, cfg)
         self.ema = EmaEncoder(self.encoder, momentum=cfg.ema_momentum)
         self.decoder = TextDecoder(vocab_size, cfg)
-        self.predictor = ConceptPredictor(cfg.dim, predictor_cfg)
+        # When channel-split, the predictor operates in the corr channel's dim.
+        pred_dim = cfg.corr_dim if cfg.channel_split else cfg.dim
+        self.predictor = ConceptPredictor(pred_dim, predictor_cfg)
 
     def forward(
         self,
@@ -91,31 +93,48 @@ class JointJepa(nn.Module):
         ids_v, pad_v = flat_ids[idx], flat_pad[idx]
         z_v, raw_v = self.encoder(ids_v, pad_v, return_raw=True)
 
-        # Reconstruction anchor (online encoder -> decoder).
+        # Reconstruction anchor (online encoder -> decoder). Uses the FULL
+        # vector so collapse is still impossible regardless of channel mode.
         logits_v = self.decoder.teacher_forcing_logits(
             z_v, ids_v, pad_v, self.bos_id
         )
         recon = reconstruction_loss(logits_v, ids_v, self.pad_id)
 
-        # Anti-collapse regularization on the *unnormalized* projection (keeps
-        # per-dimension variance up; mean-invariant so it ignores anisotropy).
-        var = variance_loss(raw_v, self.cfg.var_margin)
-        cov = covariance_loss(raw_v)
-        std_z = mean_dim_std(raw_v)
-        # Anti-anisotropy on the *normalized* vectors (spreads directions on the
-        # hypersphere so the predictor can't win by emitting the mean direction).
-        unif = uniformity_loss(z_v)
-        aniso = mean_pairwise_cosine(z_v)
+        # --- Multi-channel (routing) mode --------------------------------
+        # Split the concept space so anti-collapse doesn't flatten prediction:
+        #   corr channel  : what the predictor predicts (forward-predictable)
+        #   spread channel: what anti-collapse regularizes (diversity)
+        # Reconstruction still uses the full vector, so no collapse is possible.
+        if self.cfg.channel_split:
+            cd = self.cfg.corr_dim
+            pred_z = z_v[:, :cd]          # normalized corr channel
+            anti = raw_v[:, cd:]          # unnormalized spread channel
+        else:
+            pred_z = z_v
+            anti = raw_v
 
-        # Scatter online + EMA vectors back to a (B, S, dim) grid.
-        z_flat = torch.zeros(b * s, dim, device=device)
-        z_flat[idx] = z_v
+        # Anti-collapse regularization on the *spread channel* (or the whole
+        # vector when not split). Variance keeps per-dim spread; uniformity
+        # spreads directions. Reconstruction anchors the corr channel against
+        # collapse, so we don't need to push corr apart (which killed adjacency).
+        var = variance_loss(anti, self.cfg.var_margin)
+        cov = covariance_loss(anti)
+        std_z = mean_dim_std(anti)
+        unif = uniformity_loss(anti)
+        aniso = mean_pairwise_cosine(pred_z)
+
+        # Scatter prediction vectors back to a (B, S, cd) grid.
+        cd = pred_z.size(-1)
+        z_flat = torch.zeros(b * s, cd, device=device)
+        z_flat[idx] = pred_z
         with torch.no_grad():
             t_v = self.ema(ids_v, pad_v)
-        t_flat = torch.zeros(b * s, dim, device=device)
+            if self.cfg.channel_split:
+                t_v = t_v[:, :cd]
+        t_flat = torch.zeros(b * s, cd, device=device)
         t_flat[idx] = t_v
-        z = z_flat.reshape(b, s, dim)
-        targets = t_flat.reshape(b, s, dim)
+        z = z_flat.reshape(b, s, cd)
+        targets = t_flat.reshape(b, s, cd)
 
         # Prediction: predict sentence i from sentences 0..i-1. Documents are
         # prefix-valid, so sent_valid[:, i] implies a fully-valid context.
