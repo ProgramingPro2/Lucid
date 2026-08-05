@@ -1,0 +1,65 @@
+{
+  "artifacts_dir": "artifacts/jepa_route_v1",
+  "codec": {
+    "kind": "jepa",
+    "device": "auto",
+    "jepa_checkpoint": ""
+  },
+  "data": {
+    "corpus_path": "data/corpus_1m.txt",
+    "context_len": 16,
+    "min_sentence_chars": 12,
+    "max_sentence_chars": 400
+  },
+  "jepa": {
+    "dim": 512,
+    "tokenizer": "gpt2",
+    "max_tokens": 128,
+    "enc_layers": 4,
+    "enc_heads": 8,
+    "enc_ff_mult": 4,
+    "dec_layers": 4,
+    "dec_heads": 8,
+    "dec_ff_mult": 4,
+    "d_model": 512,
+    "dropout": 0.1,
+    "recon_warmup_epochs": 3,
+    "alpha_warmup_epochs": 3,
+    "alpha_max": 1.0,
+    "ema_momentum": 0.99,
+    "var_weight": 1.0,
+    "cov_weight": 0.04,
+    "var_margin": 1.0,
+    "uniformity_weight": 1.0,
+    "collapse_std_threshold": 0.1,
+    "channel_split": true,
+    "corr_dim": 256,
+    "batch_size": 16,
+    "lr": 0.0003,
+    "weight_decay": 0.01,
+    "epochs": 15,
+    "grad_clip": 1.0,
+    "context_len": 16,
+    "seed": 0,
+    "val_fraction": 0.05,
+    "patience": 0
+  },
+  "predictor": {
+    "d_model": 256,
+    "n_layers": 3,
+    "n_heads": 8,
+    "ff_mult": 4,
+    "max_seq_len": 64,
+    "dropout": 0.0,
+    "head": "regression",
+    "cosine_weight": 1.0,
+    "mse_weight": 1.0,
+    "use_segment_embedding": false,
+    "use_theme": false
+  },
+  "gpu_gate": {
+    "enabled": true,
+    "foreign_util_pct": 40.0,
+    "resume_util_pct": 20.0
+  }
+}
