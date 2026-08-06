@@ -1,0 +1,142 @@
+================================================================================
+ LUCID — JEPA-for-text : Per-Sentence Prediction Architecture (target design)
+================================================================================
+
+ The three subsystems: REASONER (predicts next) --- WRITER (turns concept
+ into words) with the ENCODER between them at every boundary.
+
+ Legend:
+   [BOX]      module
+   (dim)      tensor shape
+   `----->    data/control flow
+   FWD        "free-run" generation path marks the REASONING loop
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 1. ENCODER  — turn text into a 512-dim concept vector (the "meaning blob")  │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                                                               
+   sentence text:  "The kitchen door creaked open."
+        │
+        ▼
+   ┌─────────────────────┐
+   │  tokenizer (gpt2)   │  ids  ──►  [BOS] The kitchen door ... [EOS]
+   └─────────┬───────────┘
+             ▼
+   ┌─────────────────────┐
+   │ JEPA TextEncoder    │   6 layers, d_model 512, max 128 tokens
+   │ (mean-pooled, L2    │
+   │  normalized)        │
+   └─────────┬───────────┘
+             ▼
+      concept vector  z_t   (512,)  =  the sentence's meaning blob
+             │
+             ▼
+   ┌──────────────────────────────────────────────────┐
+   │ ANTI-COLLAPSE REPAIR (so it stays meaningful)     │
+   │  • variance/cov on window-disjoint sample+FIFO   │
+   │  • uniformity with neighbor-mask (protect adj)   │
+   │  • adjacent-sentence InfoNCE (pay for closeness) │
+   └──────────────────────────────────────────────────┘
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 2. REASONER  — predict the NEXT sentence's concept (the REASONING step)     │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                                                               
+   history:   z_1  z_2  ...  z_t          (sequence of sentence vectors, T<=32)
+              │    │         │
+              └────┴─────────┴──────────►  ContextTransformer trunk
+                                            (causal, 6 layers, d_model 512)
+                                            │
+                                            ▼
+                                       hidden states h_t
+                                            │
+                         ┌──────────────────┴───────────────────┐
+                         ▼                                      ▼
+            ┌──────────────────────┐              ┌──────────────────────────┐
+            │   vMF head (K=1)     │              │   MDN head (K=8 vMF)      │
+            │   mu(c)  (512,)      │              │   pi_k mu_k kappa_k       │
+            │   kappa (1,) strength│              │   (learned multimodality) │
+            └──────────┬───────────┘              └────────────┬──────────────┘
+                       │                                        │
+                       │      SAMPLE (this is NOVELTY):         │
+                       │      draw x̂ from vMF(mu, kappa/tau)    │
+                       │      kappa = coherence dial            │
+                       ▼                                        ▼
+                    x̂_{t+1}  (512,)  = novel predicted next concept
+                       │
+                       │   (FWD: one prediction completes one REASONING step)
+                       ▼
+   ┌─────────────────────────────────────────────────────────────────────┐
+   │ 3. WRITER  — two-channel, render the novel concept as real words    │
+   └─────────────────────────────────────────────────────────────────────┘
+
+   CHANNEL 1 (local coherence):            CHANNEL 2 (steering/novelty):
+   previous sentence's TOKENS              the predicted concept vector x̂
+   ──────────────────────────              ────────────────────────────────
+   [BOS] The kitchen door ... [EOS]  ┐
+                                     ├─► combined input ids + concept embed
+   (entity carry-over, style)        │        at position 0
+                                     ┘
+        ┌───────────────────────────────────────────┐
+        │  FluWriter (152M, GPT-2-style)            │
+        │  • NOTICE: we also DO NOT use the auto-   │
+        │  •  per-block FiLM: concept re-injected   │
+        │     into ALL 12 blocks (was 3)            │
+        └──────────────────┬────────────────────────┘
+                           ▼
+                    new sentence text:
+       "She froze at the sound from the back of the stairwell."
+                           │
+                           ▼
+        ┌────────────────────────────────────────────┐
+        │ CLOSED-LOOP: encode new sentence -> z_{t+1}│
+        │ feed back into reasoner history.           │
+        │ (free-run reasoning continues, step t+2...)│
+        └────────────────────────────────────────────┘
+
+
+================================================================================
+ HOW IT GENERATES — the REASONING loop, step by step
+================================================================================
+
+   STEP 0  (seed)   encode prompt sentences → context vectors z_1..z_t
+                              ↓
+   STEP 1  (reason) reasoner trunk reads history → head emits  mu, kappa
+                              ↓
+   STEP 2  (sample) x̂ = sample vMF(mu, kappa/tau)   ← NOVEL POINT (new thought)
+                              ↓
+   STEP 3  (write)  writer takes  [prev tokens] + [x̂ via all-block FiLM]
+                              →  generates next sentence
+                              ↓
+   STEP 4  (re-encode)  encode("new sentence") = z_{t+1} ;  append to history
+                              ↓
+   STEP 5  repeat STEP 1..4  →  a document unfolds, one novel step at a time
+
+   KEY PROPERTY: the writer is GENERATIVE (samples tokens, not retrieval) and
+   the concept channel is SAMPLED (not nearest-neighbor) — so every pass can
+   produce a sentence that was never written. Local coherence comes from the
+   previous sentence's WORDS; global arc/novelty comes from the SAMPLED concept.
+
+   tau (temperature over kappa) is the coherence↔novelty dial:
+     tau < 1  →  sharper   (stay on topic)
+     tau = 1  →  learned   (as the model calibrated it)
+     tau > 1  →  broader   (more novel, more risk of drift)
+
+
+================================================================================
+ MAP to what has been BUILT so far (honest status)
+================================================================================
+
+   [✓] JEPA encoder (v3)                 artifacts/jepa_v3_128t/jepa/joint_robust.pt
+   [✓] FluWriter (152M, FiLM, Phase-2)   artifacts/writer_p2_film/writer_cond.pt
+                                         (but: renders successor of its condition,
+                                          FiLM live in only 3/12 blocks — to fix)
+   [~] Paragraph ranker (retrieval-only) "36%" — a MIRAGE, superseded
+   [ ] Encoder REPAIR (adjacent-safe)    <- being built (losses+config)  [CHUNK 1]
+   [ ] vMF / MDN density heads           <- being built                   [CHUNK 2]
+   [ ] Sequence-input dataloader         next chunk
+   [ ] Two-channel writer (Phase-2.5)    next chunk
+   [ ] Anti-mirage eval suite            next chunk
+================================================================================
