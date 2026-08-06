@@ -190,28 +190,38 @@ class FluWriter(nn.Module):
         top_k: int = 50,
         top_p: float = 0.0,
         repetition_penalty: float = 1.0,
+        prefix_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Sample token ids from a concept vector (Phase-2 conditioned decode).
+        """prefix_ids (B, P): pre-tokenized [BOS] prev [EOS] prompt; when None
+        primes with [BOS]. max_tokens counts NEW tokens only. Returns only the
+        newly generated ids (B, <=max_tokens).
 
-        ``repetition_penalty`` (>=1.0) divides the logits of tokens already
-        generated, suppressing repetition loops (Guan & Huang, arXiv:2307.01542).
-        ``top_p``>0 applies nucleus sampling after top-k.
+        ``repetition_penalty`` (>=1.0) is applied per-row over tokens already
+        produced on that row. ``top_p``>0 applies nucleus sampling after top-k.
         """
         self.eval()
         dev = concept.device
         batch = concept.size(0)
-        generated = torch.full((batch, 1), bos_id, dtype=torch.long, device=dev)
-        seen: list[torch.Tensor] = []
+        if prefix_ids is None:
+            generated = torch.full((batch, 1), bos_id, dtype=torch.long, device=dev)
+        else:
+            generated = prefix_ids.to(device=dev, dtype=torch.long)
+            if generated.dim() == 1:
+                generated = generated.unsqueeze(0).expand(batch, -1).contiguous()
+            elif generated.size(0) == 1 and batch > 1:
+                generated = generated.expand(batch, -1).contiguous()
+        # Per-row (B, vocab) seen mask — correct for batch>1 (D5).
+        seen_mask = torch.zeros(batch, self.vocab_size, dtype=torch.bool, device=dev)
+        new_tokens: list[torch.Tensor] = []
         for _ in range(max_tokens):
             logits = self.forward(generated, concept)[:, -1, :]
-            if repetition_penalty > 1.0 and seen:
-                pen = torch.cat(seen, dim=0)  # (n,) unique-ish tokens so far
-                # divide existing-token logits by penalty (>=1 => push down)
-                logits[:, pen] = torch.where(
-                    logits[:, pen] > 0,
-                    logits[:, pen] / repetition_penalty,
-                    logits[:, pen] * repetition_penalty,
+            if repetition_penalty > 1.0 and seen_mask.any():
+                penalized = torch.where(
+                    logits > 0,
+                    logits / repetition_penalty,
+                    logits * repetition_penalty,
                 )
+                logits = torch.where(seen_mask, penalized, logits)
             if temperature > 0:
                 logits = logits / temperature
                 if top_k > 0:
@@ -228,10 +238,13 @@ class FluWriter(nn.Module):
             else:
                 nxt = logits.argmax(dim=-1, keepdim=True)
             generated = torch.cat([generated, nxt], dim=1)
-            seen.append(nxt.reshape(-1))
+            new_tokens.append(nxt)
+            seen_mask.scatter_(1, nxt, True)
             if eos_id is not None and (nxt == eos_id).all():
                 break
-        return generated
+        if not new_tokens:
+            return torch.empty(batch, 0, dtype=torch.long, device=dev)
+        return torch.cat(new_tokens, dim=1)
 
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters())
