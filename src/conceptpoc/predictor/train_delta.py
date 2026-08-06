@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import torch
+from dataclasses import asdict
 from torch.utils.data import DataLoader, random_split
 
 from ..config import PredictorConfig, TrainConfig
@@ -68,7 +69,7 @@ def train_delta_predictor(
             db_run = db.start_run(
                 str(corpus.sentences[0]) if corpus.sentences else "delta",
                 "deltas", train_cfg.seed, dataset.dim, context_len,
-                {"predictor": predictor_cfg.__dict__, "train": train_cfg.__dict__},
+                {"predictor": asdict(predictor_cfg), "train": train_cfg.__dict__},
             )
         else:
             run_id = db_run
