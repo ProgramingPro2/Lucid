@@ -73,6 +73,10 @@ class JointJepa(nn.Module):
         # When channel-split, the predictor operates in the corr channel's dim.
         pred_dim = cfg.corr_dim if cfg.channel_split else cfg.dim
         self.predictor = ConceptPredictor(pred_dim, predictor_cfg)
+        if cfg.anticollapse_scope == "window_disjoint" and cfg.anti_queue_size > 0:
+            self.register_buffer("anti_queue", torch.zeros(cfg.anti_queue_size, cfg.dim), persistent=False)
+            self.register_buffer("anti_queue_ptr", torch.zeros(2, dtype=torch.long), persistent=False)
+            # ptr[0] = write cursor, ptr[1] = fill count
 
     def forward(
         self,

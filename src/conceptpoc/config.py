@@ -172,6 +172,13 @@ class JepaConfig:
     channel_split: bool = False
     corr_dim: int = 256
 
+    # --- Encoder repair (neighbor-safe anti-collapse) ---
+    anticollapse_scope: str = "window_disjoint"   # "window_disjoint" | "full" (legacy)
+    anti_queue_size: int = 4096
+    neighbor_mask_k: int = 2          # exclude same-window pairs with |slot_i-slot_j| <= k from uniformity
+    align_weight: float = 0.25        # adjacent-sentence InfoNCE weight
+    align_temp: float = 0.07
+
     # Optimization.
     batch_size: int = 16
     lr: float = 3e-4

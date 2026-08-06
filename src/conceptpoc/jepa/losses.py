@@ -64,23 +64,52 @@ def covariance_loss(z: torch.Tensor) -> torch.Tensor:
     return off_diag.pow(2).sum() / d
 
 
-def uniformity_loss(z: torch.Tensor, t: float = 2.0) -> torch.Tensor:
-    """Anti-anisotropy term (Wang & Isola, 2020) on the *normalized* vectors.
-
-    VICReg's variance/covariance terms are mean-invariant, so they keep each
-    dimension's spread high yet do nothing about a large shared offset that
-    makes every normalized vector point in nearly the same direction (angular
-    collapse / anisotropy). This term directly pushes the unit vectors apart on
-    the hypersphere by minimizing log E[exp(-t * ||z_i - z_j||^2)]. For unit
-    vectors ||z_i - z_j||^2 = 2 - 2 cos, so spreading directions lowers the loss.
-    """
+def uniformity_loss(z, t=2.0, exclude_mask=None):
+    """exclude_mask: (N, N) bool, True = drop this pair from the repulsion sum."""
     z = F.normalize(z, dim=-1)
-    if z.size(0) < 2:
+    n = z.size(0)
+    if n < 2:
         return z.new_zeros(())
-    sq_dist = torch.pdist(z, p=2).pow(2)
-    n_pairs = sq_dist.new_tensor(float(sq_dist.numel()))
-    # log E[exp(-t * sq_dist)] computed stably via logsumexp.
-    return torch.logsumexp(-t * sq_dist, dim=0) - torch.log(n_pairs)
+    sq = torch.cdist(z, z, p=2).pow(2)                     # (N, N)
+    keep = torch.triu(torch.ones(n, n, dtype=torch.bool, device=z.device), diagonal=1)
+    if exclude_mask is not None:
+        keep = keep & ~exclude_mask
+    vals = sq[keep]
+    if vals.numel() == 0:
+        return z.new_zeros(())
+    return torch.logsumexp(-t * vals, dim=0) - torch.log(vals.new_tensor(float(vals.numel())))
+
+
+def adjacent_infonce(z, rows, slots, temperature=0.07):
+    """InfoNCE: positive = same window's next slot; negatives = all rows from OTHER windows.
+    z: (N, dim) normalized online vectors (valid rows)
+    rows: (N,) long window index; slots: (N,) long slot index.
+    Anchors with no valid successor are skipped.
+    Same-window non-positive columns are masked to -inf (never negatives)."""
+    n = z.size(0)
+    if n < 2:
+        return z.new_zeros(())
+    device = z.device
+    rows = rows.long()
+    slots = slots.long()
+    max_row = int(rows.max().item())
+    max_slot = int(slots.max().item())
+    # lookup[r, s] = flat index j of (row=r, slot=s), else -1
+    lookup = torch.full(
+        (max_row + 1, max_slot + 2), -1, dtype=torch.long, device=device
+    )
+    lookup[rows, slots] = torch.arange(n, device=device)
+    pos_cols = lookup[rows, slots + 1]  # (N,) successor flat index or -1
+    anchors = (pos_cols >= 0).nonzero(as_tuple=False).squeeze(-1)
+    if anchors.numel() == 0:
+        return z.new_zeros(())
+    pos_cols = pos_cols[anchors]
+    logits = (z[anchors] @ z.T) / temperature  # (A, N)
+    same_window = rows[anchors].unsqueeze(1) == rows.unsqueeze(0)
+    mask = same_window.clone()
+    mask[torch.arange(anchors.numel(), device=device), pos_cols] = False
+    logits = logits.masked_fill(mask, float("-inf"))
+    return F.cross_entropy(logits, pos_cols)
 
 
 def mean_pairwise_cosine(z: torch.Tensor, max_rows: int = 2048) -> float:
