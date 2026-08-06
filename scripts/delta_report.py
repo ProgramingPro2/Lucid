@@ -16,7 +16,7 @@ CHECKPOINT = os.path.join(ROOT, "artifacts/delta_pred/delta_predictor.pt")
 def read_val_cosine():
     """Pull best/final val_cosine from the SQLite checkpoint DB."""
     try:
-        sys.path.insert(0, ROOT)  # so `src.conceptpoc` is importable
+        sys.path.insert(0, ROOT)
         from src.conceptpoc.ckpt_db import CheckpointDB
         db = CheckpointDB(os.path.join(ROOT, "artifacts/delta_pred/train.db"))
         run = db.latest_run()
