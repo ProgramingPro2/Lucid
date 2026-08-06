@@ -1,9 +1,8 @@
-"""Phase-2: condition the pretrained writer on JEPA concept vectors.
+"""Phase-2.5: two-channel writer — previous-sentence tokens + same-sentence concept.
 
-The JEPA reasoner (encoder only, frozen) turns a context sentence into a
-concept vector. The writer is fine-tuned to produce the *next* sentence's
-tokens conditioned on that vector — so at inference, the JEPA diffusion
-predictor supplies the concept and the writer renders fluent text.
+Channel 1: previous sentence tokens as a prefix (local coherence).
+Channel 2: sentence i's concept vector via concept token + all-block FiLM (steering).
+Same-sentence pairing (concept_i -> tokens_i) fixes the Phase-2 D1 off-by-one.
 """
 from __future__ import annotations
 
@@ -18,49 +17,142 @@ from ..jepa.tokenizer import Tokenizer
 from ..progress import iter_bar, log_epoch
 from .model import FluWriter
 
+PREFIX_MAX = 96
+TARGET_MAX = 128
+SEQ_CAP = 256
+DROP_P = 0.10
 
-class ConceptSentenceDataset(Dataset):
-    """Pairs (context_sentence_concept_vector, current_sentence_tokens).
 
-    Concept = encoded vector of the preceding sentence (window of 2). The writer
-    is asked to generate the current sentence given that vector.
+class TwoChannelSentenceDataset(Dataset):
+    """Within-document (prev_tokens, target_tokens, concept_of_target) triples.
+
+    - pairs NEVER cross document boundaries (iterate docs, then i in range(len(sents)))
+    - concept = all_vecs[global_index(i)]   # SAME sentence as target (fixes D1 off-by-one)
+    - i == 0 items use the prefix-drop form (no prefix)
+    - pre-encodes all sentences once, chunked 512, as before
     """
 
-    def __init__(self, corpus_path: str, codec: JepaCodec, tokenizer: Tokenizer, seq_len: int) -> None:
+    def __init__(
+        self,
+        corpus_path: str,
+        codec: JepaCodec,
+        tokenizer: Tokenizer,
+        seq_len: int = SEQ_CAP,
+        max_docs: int | None = None,
+    ) -> None:
+        self.tok = tokenizer
+        self.seq_len = seq_len
         docs = load_documents(corpus_path)
-        sents = [s for d in docs for s in d.sentences if s.strip()]
-        self.items: list[tuple[torch.Tensor, torch.Tensor]] = []
-        # Pre-encode every sentence once (codec.encode batched, but handle large
-        # corpora in chunks to limit peak memory).
+        if max_docs is not None:
+            docs = docs[:max_docs]
+        # Flat sentence list + per-doc ranges for within-doc pairing.
+        sents: list[str] = []
+        doc_ranges: list[tuple[int, int]] = []
+        for d in docs:
+            clean = [s for s in d.sentences if s.strip()]
+            if not clean:
+                continue
+            start = len(sents)
+            sents.extend(clean)
+            doc_ranges.append((start, len(sents)))
+
         chunk = 512
-        vecs: list = []
+        vecs: list[torch.Tensor] = []
         for i in range(0, len(sents), chunk):
             v = codec.encode(sents[i : i + chunk])
             vecs.append(torch.from_numpy(v))
-        all_vecs = torch.cat(vecs, dim=0)
-        for i in range(1, len(sents)):
-            ctx = all_vecs[i - 1]  # context sentence's concept
-            target = sents[i]
-            ids, _ = tokenizer.encode_batch([target], seq_len)
-            self.items.append((ctx.unsqueeze(0), ids[0]))
+        all_vecs = torch.cat(vecs, dim=0) if vecs else torch.zeros(0, 1)
+
+        # Pre-tokenize once.
+        sent_ids: list[torch.Tensor] = []
+        for s in sents:
+            ids = tokenizer.encode(s)
+            sent_ids.append(torch.tensor(ids, dtype=torch.long))
+
+        self.items: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, bool]] = []
+        for start, end in doc_ranges:
+            for i in range(start, end):
+                local_i = i - start
+                target_ids = sent_ids[i][:TARGET_MAX]
+                concept = all_vecs[i]
+                if local_i == 0:
+                    prev_ids = torch.zeros(0, dtype=torch.long)
+                    prefix_present = False
+                else:
+                    prev_ids = sent_ids[i - 1][:PREFIX_MAX]
+                    prefix_present = True
+                self.items.append((prev_ids, target_ids, concept, prefix_present))
 
     def __len__(self) -> int:
         return len(self.items)
 
     def __getitem__(self, idx: int):
-        ctx, ids = self.items[idx]
-        return ctx, ids
+        prev_ids, target_ids, concept, prefix_present = self.items[idx]
+        prev_ids, concept, prefix_present = apply_drop_arms(
+            idx, prev_ids, concept, prefix_present
+        )
+        return prev_ids, target_ids, concept, prefix_present
 
 
-def _collate(batch):
-    ctxs = torch.cat([b[0] for b in batch], dim=0)
-    ids = [b[1] for b in batch]
-    maxlen = max(x.size(0) for x in ids)
-    pad_id = 0
-    padded = torch.full((len(ids), maxlen), pad_id, dtype=torch.long)
-    for i, x in enumerate(ids):
-        padded[i, : x.size(0)] = x
-    return ctxs, padded
+def apply_drop_arms(
+    idx: int,
+    prev_ids: torch.Tensor,
+    concept: torch.Tensor,
+    prefix_present: bool,
+    drop_p: float = DROP_P,
+) -> tuple[torch.Tensor, torch.Tensor, bool]:
+    """p=drop_p drop prefix; p=drop_p zero concept; never both. Seed 42+idx."""
+    g = torch.Generator()
+    g.manual_seed(42 + idx)
+    r = float(torch.rand(1, generator=g).item())
+    if prefix_present and r < drop_p:
+        return prev_ids, concept, False
+    if drop_p <= r < 2 * drop_p:
+        return prev_ids, torch.zeros_like(concept), prefix_present
+    return prev_ids, concept, prefix_present
+
+
+def make_collate(tok: Tokenizer, seq_len: int = SEQ_CAP):
+    """Build §5.1 sequences: [BOS]+prev+[EOS]+tgt+[EOS] with correct label masks."""
+
+    def _collate(batch):
+        full_seqs: list[list[int]] = []
+        n_prefix_masks: list[int] = []
+        concepts: list[torch.Tensor] = []
+        for prev_ids, target_ids, concept, prefix_present in batch:
+            prev = prev_ids.view(-1).tolist()[:PREFIX_MAX]
+            tgt = target_ids.view(-1).tolist()[:TARGET_MAX]
+            if prefix_present and prev:
+                ids = [tok.bos_id] + prev + [tok.eos_id] + tgt + [tok.eos_id]
+                # Mask labels predicting inside the prefix (BOS..last prev → EOS sep).
+                # Separator position (index 1+len(prev)) supervises the first target token.
+                n_mask = 1 + len(prev)
+            else:
+                ids = [tok.bos_id] + tgt + [tok.eos_id]
+                n_mask = 0
+            ids = ids[:seq_len]
+            full_seqs.append(ids)
+            n_prefix_masks.append(n_mask)
+            concepts.append(concept.view(-1).float())
+
+        max_full = min(seq_len, max(len(s) for s in full_seqs))
+        b = len(full_seqs)
+        padded = torch.full((b, max_full), tok.pad_id, dtype=torch.long)
+        for i, s in enumerate(full_seqs):
+            s = s[:max_full]
+            padded[i, : len(s)] = torch.tensor(s, dtype=torch.long)
+
+        # writer(input[:, :-1], concept, labels=input[:, 1:]) with masks
+        inputs = padded[:, :-1].contiguous()
+        labels = padded[:, 1:].clone()
+        labels[labels == tok.pad_id] = -100
+        for i, n_mask in enumerate(n_prefix_masks):
+            if n_mask > 0:
+                labels[i, :n_mask] = -100
+        concept_batch = torch.stack(concepts, dim=0)
+        return inputs, labels, concept_batch
+
+    return _collate
 
 
 def train_phase2(
@@ -102,18 +194,23 @@ def train_phase2(
         print(f"[writer-p2] loaded Phase-1 weights from {phase1_path}")
     writer.to(dev)
 
-    # Freeze most of the writer; tune only concept projection + top few blocks so
-    # we don't catastrophically forget Phase-1 fluency.
+    # Freeze most of the writer; tune concept_proj + top blocks + all-block FiLM (D4).
     trainable = ["concept_proj"]
     trainable += [f"blocks.{i}." for i in range(cfg.writer.n_layers - 3, cfg.writer.n_layers)]
+    trainable += [f"blocks.{i}.film" for i in range(cfg.writer.n_layers)]
     for name, p in writer.named_parameters():
         p.requires_grad = any(t in name for t in trainable)
     opt = torch.optim.AdamW(
         [p for p in writer.parameters() if p.requires_grad], lr=cfg.writer.lr2
     )
 
-    dataset = ConceptSentenceDataset(str(cfg.data.corpus_path), codec, tok, cfg.writer.seq_len)
-    loader = DataLoader(dataset, batch_size=cfg.writer.batch_size, shuffle=True, collate_fn=_collate)
+    dataset = TwoChannelSentenceDataset(
+        str(cfg.data.corpus_path), codec, tok, cfg.writer.seq_len
+    )
+    collate = make_collate(tok, cfg.writer.seq_len)
+    loader = DataLoader(
+        dataset, batch_size=cfg.writer.batch_size, shuffle=True, collate_fn=collate
+    )
 
     db = None
     run_id = None
@@ -150,16 +247,15 @@ def train_phase2(
         it = iter(loader)
         for _ in progress_iter:
             try:
-                ctx, tgt = next(it)
+                inputs, labels, concept = next(it)
             except StopIteration:
                 it = iter(loader)
-                ctx, tgt = next(it)
-            ctx, tgt = ctx.to(dev), tgt.to(dev)
-            # inputs = target[:-1]; labels = target[1:], masking pad (-100)
-            labels = tgt[:, 1:]
-            labels[labels == 0] = -100  # pad_id masked out
+                inputs, labels, concept = next(it)
+            inputs = inputs.to(dev)
+            labels = labels.to(dev)
+            concept = concept.to(dev)
             opt.zero_grad()
-            loss = writer(tgt[:, :-1], ctx, labels=labels)
+            loss = writer(inputs, concept, labels=labels)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(
                 [p for p in writer.parameters() if p.requires_grad], 1.0

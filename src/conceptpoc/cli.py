@@ -876,7 +876,8 @@ def cmd_writer_condition(cfg: Config, *, progress: bool = True) -> None:
     from .persistence import save_writer
 
     model, tok = train_phase2(cfg, progress=progress)
-    out = cfg.artifacts_dir / "writer_cond.pt"
+    # Phase-2.5 two-channel checkpoint; never overwrite writer_p2_film/writer_cond.pt (A/B control).
+    out = cfg.artifacts_dir / "writer_two_channel.pt"
     save_writer(
         out,
         model,
@@ -890,9 +891,10 @@ def cmd_writer_condition(cfg: Config, *, progress: bool = True) -> None:
             "concept_dim": cfg.jepa.dim,
             "use_concept": cfg.writer.use_concept,
             "use_film": cfg.writer.use_film,
+            "two_channel": True,
         },
     )
-    print(f"writer phase-2 done; {model.num_parameters():,} params; saved to {out}")
+    print(f"writer phase-2.5 done; {model.num_parameters():,} params; saved to {out}")
 
 
 def cmd_eval_harness(cfg: Config, args, *, progress: bool = True) -> None:
