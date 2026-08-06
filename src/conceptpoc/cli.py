@@ -404,6 +404,82 @@ def cmd_generate_hybrid(cfg: Config, prompt: str, steps: int, writer_path: str |
         context.append(pred[0])
 
 
+def cmd_generate_delta(cfg: Config, prompt: str, steps: int,
+                       writer_path: str | None = None,
+                       delta_path: str | None = None,
+                       step_size: float = 1.0) -> None:
+    """Delta generation: iterate the *change direction*, not the destination.
+
+    Flow:
+      1. Encode prompt into context concept vectors (JEPA encoder).
+      2. Compute deltas (change directions) from recent context vectors.
+      3. DeltaPredictor predicts the NEXT change direction.
+      4. next_vec = current_vec + step*d_pred, renormalized; writer renders it.
+      5. Append encoded result; repeat.
+    The delta predictor was empirically shown to learn the forward change signal
+    (ridge ~0.44) where exact-next was anti-predictive (~0.05 wall).
+    """
+    import torch
+    import numpy as np
+
+    from .data.segment import segment_sentences
+    from .persistence import load_joint, load_predictor, load_writer
+    from .codec.jepa_codec import JepaCodec
+    from .jepa.tokenizer import Tokenizer
+    from .predictor.delta_model import apply_delta
+
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    jepa_ckpt = cfg.writer.jepa_checkpoint or cfg.codec.jepa_checkpoint or \
+        str(cfg.artifacts_dir / "jepa" / "joint_robust.pt")
+    model, tok = load_joint(jepa_ckpt)
+    model.to(dev).eval()
+    codec = JepaCodec(model, tok, cfg.jepa.max_tokens, device=str(dev))
+
+    delta_path = delta_path or str(cfg.artifacts_dir / "delta_predictor.pt")
+    delta_pred = load_predictor(delta_path, device=str(dev))
+    delta_pred.to(dev).eval()
+
+    writer_path = writer_path or (cfg.artifacts_dir / "writer_cond.pt")
+    writer = load_writer(writer_path, device=str(dev))
+
+    seed_sents = segment_sentences(prompt) or [prompt]
+    context = [np.asarray(codec.encode(seed_sents), dtype=np.float32).reshape(1, -1)[0]
+               for _ in ()] or list(np.asarray(codec.encode(seed_sents), dtype=np.float32))
+
+    print("PROMPT:", prompt)
+    print("DELTA CONTINUATION:")
+    for i in range(steps):
+        while len(context) < 3:
+            # need at least 2 prior vectors to form a delta
+            context.append(context[-1])
+        # window of deltas from recent context (need >=2 prior vectors)
+        last = context[-3:]
+        # build delta sequence from the context (d_j = z[j+1]-z[j])
+        zs = np.stack(last)
+        deltas = []
+        for j in range(len(zs) - 1):
+            d = zs[j+1] - zs[j]
+            n = np.linalg.norm(d)
+            deltas.append(d / n if n > 0 else d)
+        deltas = deltas[-cfg.predictor.max_seq_len:]
+        ctx = torch.from_numpy(np.stack(deltas)).unsqueeze(0).to(dev)  # (1, L, dim)
+        d_pred = delta_pred(ctx).squeeze(0).cpu().numpy()  # (dim,)
+        # apply change to the current vector
+        cur = zs[-1]
+        nxt = apply_delta(torch.from_numpy(cur).unsqueeze(0),
+                          torch.from_numpy(d_pred).unsqueeze(0),
+                          step=step_size).squeeze(0).cpu().numpy()
+        concept = torch.from_numpy(nxt).unsqueeze(0).to(dev)
+        token_ids = writer.generate(
+            concept, max_tokens=cfg.jepa.max_tokens,
+            bos_id=tok.bos_id, eos_id=tok.eos_id, temperature=0.7, top_k=50,
+            top_p=0.9, repetition_penalty=1.3,
+        )[0].tolist()
+        text = tok.decode(token_ids)
+        print("  -", text)
+        context.append(nxt)
+
 
 def cmd_generate_trajectory(cfg: Config, prompt: str, rounds: int,
                             writer_path: str | None = None,
@@ -971,6 +1047,12 @@ def build_parser() -> argparse.ArgumentParser:
     gt.add_argument("--rounds", type=int, default=2)
     gt.add_argument("--writer", default=None, help="path to Phase-2 writer checkpoint")
     gt.add_argument("--planner", default=None, help="path to trajectory planner checkpoint")
+    gd = sub.add_parser("generate-delta", parents=[common])
+    gd.add_argument("--prompt", required=True, help="continuation seed text")
+    gd.add_argument("--steps", type=int, default=6)
+    gd.add_argument("--writer", default=None, help="path to Phase-2 writer checkpoint")
+    gd.add_argument("--delta", default=None, help="path to delta predictor checkpoint")
+    gd.add_argument("--step-size", type=float, default=1.0, help="delta step magnitude")
     imp = sub.add_parser("improve", parents=[common])
     imp.add_argument(
         "--conditioned",
@@ -1046,6 +1128,10 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "generate-trajectory":
         cmd_generate_trajectory(cfg, args.prompt, args.rounds,
                                 writer_path=args.writer, planner_path=args.planner)
+    elif args.command == "generate-delta":
+        cmd_generate_delta(cfg, args.prompt, args.steps,
+                           writer_path=args.writer, delta_path=args.delta,
+                           step_size=args.step_size)
     elif args.command == "improve":
         cmd_improve(
             cfg, conditioned=getattr(args, "conditioned", False), progress=progress
