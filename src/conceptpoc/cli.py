@@ -439,7 +439,6 @@ def cmd_generate_delta(cfg: Config, prompt: str, steps: int,
     delta_path = delta_path or str(cfg.artifacts_dir / "delta_predictor.pt")
     delta_pred = load_predictor(delta_path, device=str(dev))
     delta_pred.to(dev).eval()
-
     writer_path = writer_path or (cfg.artifacts_dir / "writer_cond.pt")
     writer = load_writer(writer_path, device=str(dev))
 
@@ -464,7 +463,7 @@ def cmd_generate_delta(cfg: Config, prompt: str, steps: int,
             deltas.append(d / n if n > 0 else d)
         deltas = deltas[-cfg.predictor.max_seq_len:]
         ctx = torch.from_numpy(np.stack(deltas)).unsqueeze(0).to(dev)  # (1, L, dim)
-        d_pred = delta_pred(ctx).squeeze(0).cpu().numpy()  # (dim,)
+        d_pred = delta_pred(ctx).squeeze(0).detach().cpu().numpy()  # (dim,)
         # apply change to the current vector
         cur = zs[-1]
         nxt = apply_delta(torch.from_numpy(cur).unsqueeze(0),
