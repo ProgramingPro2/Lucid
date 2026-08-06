@@ -89,6 +89,40 @@ def cmd_train(cfg: Config, *, progress: bool = True) -> None:
     print(f"trained predictor ({model.num_parameters():,} params); {best}")
 
 
+def cmd_train_delta(cfg: Config, *, progress: bool = True) -> None:
+    """Train the delta (change-direction) forward predictor."""
+    cfg.ensure_dirs()
+    docs = load_documents(
+        cfg.data.corpus_path, cfg.data.min_sentence_chars, cfg.data.max_sentence_chars
+    )
+    codec = build_codec(cfg.codec)
+    cache = EmbeddingCache(cfg.artifacts_dir / "cache")
+    codec_id = f"{cfg.codec.kind}:{cfg.codec.model_name}"
+    corpus = cache.build(docs, codec, codec_id, progress=progress)
+
+    from .predictor.train_delta import train_delta_predictor
+
+    model, history = train_delta_predictor(
+        corpus,
+        cfg.predictor,
+        cfg.train,
+        progress=progress,
+        gate=_build_gate(cfg, progress=progress),
+        db_path=cfg.artifacts_dir / "train.db",
+        context_len=cfg.data.context_len,
+    )
+    from .persistence import save_predictor
+
+    out = cfg.artifacts_dir / "delta_predictor.pt"
+    save_predictor(out, model)
+    best = history.get("best_val_cosine", float("nan"))
+    print(
+        f"trained delta predictor ({model.num_parameters():,} params); "
+        f"best_val_cosine={best:.4f}"
+    )
+    print(f"saved to {out}")
+
+
 def cmd_train_diffusion(cfg: Config, *, progress: bool = True) -> None:
     cfg.ensure_dirs()
     cfg.predictor.head = "diffusion"
@@ -914,6 +948,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("prepare", parents=[common])
     sub.add_parser("train", parents=[common])
+    sub.add_parser("train-delta", parents=[common])
     sub.add_parser("train-diffusion", parents=[common])
     sub.add_parser("train-decoder-robust", parents=[common])
     sub.add_parser("train-joint", parents=[common])
@@ -992,6 +1027,8 @@ def main(argv: list[str] | None = None) -> None:
         cmd_prepare(cfg, progress=progress)
     elif args.command == "train":
         cmd_train(cfg, progress=progress)
+    elif args.command == "train-delta":
+        cmd_train_delta(cfg, progress=progress)
     elif args.command == "train-diffusion":
         cmd_train_diffusion(cfg, progress=progress)
     elif args.command == "train-decoder-robust":
