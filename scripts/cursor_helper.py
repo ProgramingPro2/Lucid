@@ -53,8 +53,11 @@ def run(args):
     prompt += file_instruction(args.out)
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    cmd = [CURSOR_AGENT, "-p", "--mode", args.mode, "--model", args.model,
-           "--output-format", "json", "--trust", "--workspace", args.workspace, prompt]
+    cmd = [CURSOR_AGENT, "-p", "--model", args.model, "--output-format", "json",
+           "--trust", "--workspace", args.workspace]
+    if args.mode in ("plan", "ask"):
+        cmd += ["--mode", args.mode]
+    cmd.append(prompt)
     print(f"[cursor-helper] launching: {' '.join(cmd[:6])}... (mode={args.mode} model={args.model})")
     fd = open(args.log, "w") if args.log else subprocess.DEVNULL
     proc = subprocess.Popen(cmd, stdout=fd, stderr=subprocess.STDOUT, text=True)
@@ -127,7 +130,7 @@ def main():
     r.add_argument("--prompt-file", required=True)
     r.add_argument("--out", required=True, help="file Cursor must write the deliverable to")
     r.add_argument("--model", default="claude-sonnet-5-thinking-medium")
-    r.add_argument("--mode", default="plan", choices=["plan", "ask"])
+    r.add_argument("--mode", default="write", choices=["write", "plan", "ask"])
     r.add_argument("--workspace", default=ROOT)
     r.add_argument("--timeout", type=int, default=900)
     r.add_argument("--min-bytes", type=int, default=200)
