@@ -1,0 +1,31 @@
+{
+  "corpus_path": "data/corpus_1m.txt",
+  "jepa_checkpoint": "artifacts/jepa_repair_1m/jepa/joint.pt",
+  "writer_checkpoint": "artifacts/writer_p25/writer_two_channel.pt",
+  "old_writer_checkpoint": "artifacts/writer_p2_film/writer_cond.pt",
+  "out_dir": "artifacts/sentence_pred",
+  "min_sents": 4,
+  "context_len": 32,
+  "held_out_frac": 0.10,
+  "predictor": {
+    "d_model": 512,
+    "n_layers": 6,
+    "n_heads": 8,
+    "ff_mult": 4,
+    "dropout": 0.1,
+    "max_seq_len": 34
+  },
+  "vmf": {"kappa_min": 1.0, "kappa_max": 1000.0, "kappa_init": 60.0},
+  "mdn": {"K": 8},
+  "train": {"batch_size": 256, "lr": 3e-4, "epochs": 30, "patience": 5, "seed": 42},
+  "eval": {
+    "seed": 1234,
+    "n_eval": 5000,
+    "n_candidates_global": 1000,
+    "n_samples": 8,
+    "temperatures": [0.5, 1.0, 2.0],
+    "n_render": 1000,
+    "n_rollout_seeds": 100,
+    "rollout_steps": 8
+  }
+}
