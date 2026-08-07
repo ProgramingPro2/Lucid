@@ -1,0 +1,34 @@
+{
+  "corpus_path": "data/corpus_1m.txt",
+  "jepa_checkpoint": "artifacts/jepa_v3_128t/jepa/joint_robust.pt",
+  "writer_checkpoint": "artifacts/writer_p2_film/writer_cond.pt",
+  "old_writer_checkpoint": "artifacts/writer_p2_film/writer_cond.pt",
+  "out_dir": "artifacts/sentence_pred_dry",
+  "min_sents": 4,
+  "context_len": 8,
+  "held_out_frac": 0.10,
+  "max_docs": 60,
+  "dry_run": true,
+  "device": "cuda",
+  "predictor": {
+    "d_model": 64,
+    "n_layers": 1,
+    "n_heads": 2,
+    "ff_mult": 2,
+    "dropout": 0.0,
+    "max_seq_len": 34
+  },
+  "vmf": {"kappa_min": 1.0, "kappa_max": 1000.0, "kappa_init": 60.0},
+  "mdn": {"K": 2},
+  "train": {"batch_size": 32, "lr": 3e-4, "epochs": 1, "patience": 1, "seed": 42},
+  "eval": {
+    "seed": 1234,
+    "n_eval": 50,
+    "n_candidates_global": 20,
+    "n_samples": 2,
+    "temperatures": [1.0],
+    "n_render": 4,
+    "n_rollout_seeds": 2,
+    "rollout_steps": 2
+  }
+}
