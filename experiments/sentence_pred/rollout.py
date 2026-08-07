@@ -145,8 +145,11 @@ def generate_document(
         history_vecs.append(fed)
         history_texts.append(text)
 
-    out = history_texts[1:]  # generated only (exclude seed)
-    out.instrumentation = instr  # type: ignore[attr-defined]
+    class _SentList(list):
+        instrumentation: list[dict[str, Any]]
+
+    out: _SentList = _SentList(history_texts[1:])  # generated only (exclude seed)
+    out.instrumentation = instr
     return out
 
 
