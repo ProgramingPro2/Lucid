@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
 
 from ..config import JepaConfig, PredictorConfig
@@ -34,9 +35,13 @@ class JointHistory:
     # Mean pairwise cosine of concept vectors (anisotropy; -> 1 means angular
     # collapse). The uniformity regularizer should keep this low.
     aniso: list[float] = field(default_factory=list)
+    align: list[float] = field(default_factory=list)
+    adj_cos: list[float] = field(default_factory=list)
     alpha: list[float] = field(default_factory=list)
     # Held-out prediction cosine per epoch (NaN when no val split was used).
     val_pred_cos: list[float] = field(default_factory=list)
+    val_adj_cos: list[float] = field(default_factory=list)
+    val_shuf_cos: list[float] = field(default_factory=list)
     best_epoch: int = -1
     best_val_cos: float = float("-inf")
     collapsed: bool = False
@@ -51,8 +56,12 @@ class JointHistory:
             "recon_acc": self.recon_acc[-1],
             "std_z": self.std_z[-1],
             "aniso": self.aniso[-1] if self.aniso else float("nan"),
+            "align": self.align[-1] if self.align else float("nan"),
+            "adj_cos": self.adj_cos[-1] if self.adj_cos else float("nan"),
             "alpha": self.alpha[-1],
             "val_pred_cos": self.val_pred_cos[-1] if self.val_pred_cos else float("nan"),
+            "val_adj_cos": self.val_adj_cos[-1] if self.val_adj_cos else float("nan"),
+            "val_shuf_cos": self.val_shuf_cos[-1] if self.val_shuf_cos else float("nan"),
             "best_epoch": self.best_epoch,
             "best_val_cos": self.best_val_cos if self.best_epoch > 0 else float("nan"),
             "collapsed": self.collapsed,
@@ -153,12 +162,14 @@ def train_joint(
             start_epoch = ckpt_epoch + 1
             # Restore history so metrics are continuous.
             for m in db.epoch_metrics(run_id):
-                ep = m["epoch"]
                 for key, attr in (
                     ("total", "total"), ("recon", "recon"), ("pred", "pred"),
                     ("recon_acc", "recon_acc"), ("std_z", "std_z"),
-                    ("aniso", "aniso"), ("alpha", "alpha"),
+                    ("aniso", "aniso"), ("align", "align"), ("adj_cos", "adj_cos"),
+                    ("alpha", "alpha"),
                     ("val_pred_cos", "val_pred_cos"),
+                    ("val_adj_cos", "val_adj_cos"),
+                    ("val_shuf_cos", "val_shuf_cos"),
                 ):
                     if key in m:
                         getattr(history, attr).append(m[key])
@@ -179,7 +190,10 @@ def train_joint(
     for epoch in range(start_epoch, cfg.epochs):
         alpha = _alpha_for_epoch(epoch, cfg)
         model.train()
-        agg = {"total": 0.0, "recon": 0.0, "pred": 0.0, "acc": 0.0, "std": 0.0, "aniso": 0.0}
+        agg = {
+            "total": 0.0, "recon": 0.0, "pred": 0.0, "acc": 0.0, "std": 0.0,
+            "aniso": 0.0, "align": 0.0, "adj_cos": 0.0,
+        }
         n = 0
         batch_iter = iter_bar(
             loader,
@@ -208,6 +222,9 @@ def train_joint(
             agg["acc"] += out.recon_acc
             agg["std"] += out.std_z
             agg["aniso"] += out.aniso
+            agg["align"] += float(out.align.item()) if torch.is_tensor(out.align) else float(out.align)
+            if out.adj_cos == out.adj_cos:  # not NaN
+                agg["adj_cos"] += out.adj_cos
             n += 1
 
         history.total.append(agg["total"] / n)
@@ -216,10 +233,17 @@ def train_joint(
         history.recon_acc.append(agg["acc"] / n)
         history.std_z.append(agg["std"] / n)
         history.aniso.append(agg["aniso"] / n)
+        history.align.append(agg["align"] / n)
+        history.adj_cos.append(agg["adj_cos"] / n)
         history.alpha.append(alpha)
 
-        val_cos = _validate(model, val_loader, alpha, dev) if val_loader else float("nan")
+        if val_loader:
+            val_cos, val_adj, val_shuf = _validate(model, val_loader, alpha, dev)
+        else:
+            val_cos, val_adj, val_shuf = float("nan"), float("nan"), float("nan")
         history.val_pred_cos.append(val_cos)
+        history.val_adj_cos.append(val_adj)
+        history.val_shuf_cos.append(val_shuf)
 
         # Optional best-checkpoint selection (opt-in via patience > 0). E1b showed
         # val_pred_cos plateaus early and does not track downstream eval quality
@@ -246,7 +270,11 @@ def train_joint(
                 "recon_acc": history.recon_acc[-1],
                 "std_z": history.std_z[-1],
                 "aniso": history.aniso[-1],
+                "align": history.align[-1],
+                "adj_cos": history.adj_cos[-1],
                 "val_pred_cos": val_cos,
+                "val_adj": val_adj,
+                "val_shuf": val_shuf,
                 "total": history.total[-1],
             },
             enabled=progress,
@@ -270,8 +298,12 @@ def train_joint(
                     "recon_acc": history.recon_acc[-1],
                     "std_z": history.std_z[-1],
                     "aniso": history.aniso[-1],
+                    "align": history.align[-1],
+                    "adj_cos": history.adj_cos[-1],
                     "alpha": alpha,
                     "val_pred_cos": val_cos,
+                    "val_adj_cos": val_adj,
+                    "val_shuf_cos": val_shuf,
                 },
             )
             db.save_checkpoint(run_id, epoch, model, opt)
@@ -300,16 +332,58 @@ def train_joint(
 
 
 @torch.no_grad()
-def _validate(model: JointJepa, val_loader: DataLoader, alpha: float, dev) -> float:
-    """Mean held-out prediction cosine (a generalization monitor)."""
+def _within_window_shuf_cos(z: torch.Tensor, valid: torch.Tensor) -> float:
+    """Mean cosine of within-window-shuffled adjacent pairs (gate control)."""
+    # z: (B, S, D), valid: (B, S)
+    b, s, _ = z.shape
+    cos_sum = 0.0
+    n = 0
+    for bi in range(b):
+        idxs = valid[bi].nonzero(as_tuple=False).squeeze(-1)
+        if idxs.numel() < 2:
+            continue
+        vecs = F.normalize(z[bi, idxs], dim=-1)
+        # Adjacent (true order)
+        # Shuffled: permute vectors, then take consecutive pairs in new order
+        perm = torch.randperm(vecs.size(0), device=vecs.device)
+        shuf = vecs[perm]
+        cos_sum += float((shuf[:-1] * shuf[1:]).sum(dim=-1).sum().item())
+        n += int(shuf.size(0) - 1)
+    return cos_sum / max(1, n)
+
+
+@torch.no_grad()
+def _validate(
+    model: JointJepa, val_loader: DataLoader, alpha: float, dev
+) -> tuple[float, float, float]:
+    """Mean held-out pred_cos, adj_cos, and within-doc-shuffled cosine."""
     model.eval()
-    total = 0.0
+    pred_total = adj_total = shuf_total = 0.0
     n = 0
     for sent_ids, sent_pad, sent_valid in val_loader:
-        out = model(
-            sent_ids.to(dev), sent_pad.to(dev), sent_valid.to(dev), alpha
-        )
-        total += out.pred_cos
+        sent_ids = sent_ids.to(dev)
+        sent_pad = sent_pad.to(dev)
+        sent_valid = sent_valid.to(dev)
+        out = model(sent_ids, sent_pad, sent_valid, alpha)
+        pred_total += out.pred_cos
+        if out.adj_cos == out.adj_cos:
+            adj_total += out.adj_cos
+        # Rebuild online z grid for within-window shuffle control (~6 lines).
+        b, s, length = sent_ids.shape
+        flat_ids = sent_ids.reshape(b * s, length)
+        flat_pad = sent_pad.reshape(b * s, length)
+        flat_valid = sent_valid.reshape(b * s)
+        idx = flat_valid.nonzero(as_tuple=False).squeeze(-1)
+        z_v = model.encoder(flat_ids[idx], flat_pad[idx])
+        cd = z_v.size(-1)
+        if model.cfg.channel_split:
+            z_v = z_v[:, : model.cfg.corr_dim]
+            cd = z_v.size(-1)
+        z_flat = torch.zeros(b * s, cd, device=dev)
+        z_flat[idx] = z_v
+        z = z_flat.reshape(b, s, cd)
+        shuf_total += _within_window_shuf_cos(z, sent_valid)
         n += 1
     model.train()
-    return total / max(1, n)
+    n = max(1, n)
+    return pred_total / n, adj_total / n, shuf_total / n
