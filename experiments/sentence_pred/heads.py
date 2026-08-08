@@ -371,3 +371,19 @@ class SentenceDensityPredictor(nn.Module):
         mu_best = mu[torch.arange(b, device=mu.device), best]
         k_best = kappa[torch.arange(b, device=mu.device), best].unsqueeze(-1)
         return mu_best, k_best
+
+    @torch.no_grad()
+    def mixture_params_last(
+        self,
+        context: torch.Tensor,
+        pad_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """MDN params at last real position: (pi_logits (B,K), mu (B,K,D), kappa (B,K))."""
+        if self.head_type != "mdn":
+            raise ValueError(
+                f"mixture_params_last requires head_type='mdn', got {self.head_type!r}"
+            )
+        h = self.trunk(context, pad_mask)
+        h_last = ContextTransformer.last_real_token(h, pad_mask).unsqueeze(1)
+        pi_logits, mu, kappa = self.head(h_last)
+        return pi_logits.squeeze(1), mu.squeeze(1), kappa.squeeze(1)

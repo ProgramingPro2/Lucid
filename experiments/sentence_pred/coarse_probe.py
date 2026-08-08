@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
-"""Cheap CPU probes for coarse-steer (Fable §7).
+"""Cheap probes for coarse-steer (Fable §7).
 
-P0 — paragraph/topic centroid stability on the repaired-codec sentence space.
-Numpy only at runtime (corpus loader may import torch). No retraining.
+P0 — paragraph/topic centroid stability (CPU, numpy).
+P2 — concept-space anchored rollout, no writer (GPU).
+P1 — FiLM legibility of pooled/slerped concepts (GPU).
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 import numpy as np
+
+if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT / "src"))
@@ -21,6 +26,10 @@ from experiments.sentence_pred.data import SentenceCorpus, load_sentence_corpus 
 
 DEFAULT_CORPUS = "artifacts/sentence_pred/corpus_repair/corpus_754d65cd97f3bfb1"
 DEFAULT_OUT = "artifacts/sentence_pred/coarse_steer/probes_P0.json"
+DEFAULT_MDN = "artifacts/sentence_pred/mdn.pt"
+DEFAULT_WRITER = "artifacts/writer_p25/writer_two_channel.pt"
+DEFAULT_JEPA = "artifacts/jepa_repair_1m/jepa/joint.pt"
+SEEDS_PATH = "artifacts/sentence_pred/forward_gen/seeds.json"
 
 
 def _l2_normalize(x: np.ndarray, eps: float = 1e-12) -> np.ndarray:
@@ -310,17 +319,328 @@ def print_p0_table(results: dict) -> None:
     print("=" * 72)
 
 
+# ---------------------------------------------------------------------------
+# P2 — concept-space anchored rollout (no writer / no re-encode)
+# ---------------------------------------------------------------------------
+
+
+def _l2_torch(x):
+    import torch
+    import torch.nn.functional as F
+
+    return F.normalize(x, dim=-1)
+
+
+def run_p2(
+    corpus: SentenceCorpus,
+    mdn_path: str,
+    seeds_path: str,
+    device: str = "auto",
+    steps: int = 8,
+    n_seeds: int = 20,
+    context_len: int = 8,
+) -> dict:
+    """Closed loop fed:=concept; flat vs anchored; median cos(concept_k, a0) at k=8."""
+    import torch
+
+    from experiments.sentence_pred.coarse_steer import (
+        CoarseSteerConfig,
+        anchored_sample,
+        slerp,
+    )
+    from experiments.sentence_pred.forward_gen import load_mdn_predictor
+    from experiments.sentence_pred.heads import sample_vmf
+
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    predictor = load_mdn_predictor(mdn_path, device=device)
+    seeds_file = Path(seeds_path)
+    if seeds_file.is_file():
+        seed_texts = json.loads(seeds_file.read_text(encoding="utf-8"))[:n_seeds]
+    else:
+        from experiments.sentence_pred.forward_gen import _pick_seeds
+
+        seed_texts = _pick_seeds(corpus, n_seeds, seed=1234)
+
+    # Map seed texts → corpus vectors when possible; else encode via nearest sentence
+    # Prefer exact string match in corpus; fallback to using held mid-doc vectors.
+    text_to_vec = {}
+    for i, t in enumerate(corpus.sentences):
+        text_to_vec[t.strip()] = corpus.sent_vecs[i]
+
+    seed_vecs = []
+    for t in seed_texts:
+        key = t.strip()
+        if key in text_to_vec:
+            seed_vecs.append(_l2_normalize(text_to_vec[key]))
+        else:
+            # fuzzy: use first held mid-doc sentence as stand-in (should not happen)
+            raise RuntimeError(f"Seed text not found in corpus: {t[:80]!r}")
+
+    cfg_anchored = CoarseSteerConfig(eta=0.35, beta=8.0, anchor_lambda=0.10, n_cand=8)
+    flat_final: list[float] = []
+    anc_final: list[float] = []
+    flat_curves: list[list[float]] = []
+    anc_curves: list[list[float]] = []
+
+    def _rollout(seed_vec: np.ndarray, anchored: bool) -> list[float]:
+        device_t = next(predictor.parameters()).device
+        a0 = torch.from_numpy(seed_vec[None, :].astype(np.float32)).to(device_t)
+        a = a0.clone()
+        history = [seed_vec.astype(np.float32)]
+        cos_to_a0: list[float] = []
+        for step in range(steps):
+            window = history[-context_len:]
+            ctx = (
+                torch.from_numpy(np.stack(window).astype(np.float32))
+                .unsqueeze(0)
+                .to(device_t)
+            )
+            pad = torch.zeros(1, ctx.size(1), dtype=torch.bool, device=device_t)
+            if anchored:
+                samp = anchored_sample(predictor, ctx, pad, a, cfg_anchored)
+                concept = samp["concept"]
+                # EMA update with concept (no writer): u = concept
+                lam = 0.30 if step < 2 else float(cfg_anchored.anchor_lambda)
+                a = _l2_torch((1.0 - lam) * a + lam * concept)
+            else:
+                # flat MDN sample
+                sample = predictor.sample(ctx, pad, n_samples=1, temperature=1.0)
+                concept = _l2_torch(sample[:, 0, :])
+            c_np = concept.detach().float().cpu().numpy()[0]
+            cos_to_a0.append(float(np.dot(_l2_normalize(c_np), _l2_normalize(seed_vec))))
+            history.append(_l2_normalize(c_np))
+        return cos_to_a0
+
+    for i, sv in enumerate(seed_vecs):
+        print(f"[P2] seed {i + 1}/{len(seed_vecs)}", flush=True)
+        fc = _rollout(sv, anchored=False)
+        ac = _rollout(sv, anchored=True)
+        flat_curves.append(fc)
+        anc_curves.append(ac)
+        flat_final.append(fc[-1])
+        anc_final.append(ac[-1])
+
+    med_flat = float(np.median(flat_final))
+    med_anc = float(np.median(anc_final))
+    delta = med_anc - med_flat
+    passed = bool(med_anc >= med_flat + 0.20 and med_anc >= 0.50)
+    kill = bool(med_anc <= med_flat + 0.05)
+
+    return {
+        "probe": "P2",
+        "n_seeds": len(seed_vecs),
+        "steps": steps,
+        "device": device,
+        "median_cos_k8_flat": med_flat,
+        "median_cos_k8_anchored": med_anc,
+        "delta_anchored_minus_flat": float(delta),
+        "mean_cos_k8_flat": float(np.mean(flat_final)),
+        "mean_cos_k8_anchored": float(np.mean(anc_final)),
+        "curve_mean_flat": [float(np.mean([c[k] for c in flat_curves])) for k in range(steps)],
+        "curve_mean_anchored": [
+            float(np.mean([c[k] for c in anc_curves])) for k in range(steps)
+        ],
+        "verdict": "PASS" if passed else ("KILL" if kill else "FAIL"),
+        "pass": passed,
+        "kill": kill,
+        "rules": {
+            "pass_if": "anchored_median >= flat_median + 0.20 AND anchored_median >= 0.50",
+            "kill_if": "anchored_median <= flat_median + 0.05",
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# P1 — FiLM legibility of pooled / slerped concepts
+# ---------------------------------------------------------------------------
+
+
+def run_p1(
+    corpus: SentenceCorpus,
+    mdn_path: str,
+    writer_path: str,
+    jepa_path: str,
+    device: str = "auto",
+    n_items: int = 200,
+    g: int = 5,
+    seed: int = 1234,
+) -> dict:
+    """Render with same-z / pooled G=5 / slerp(centroid, MDN, 0.35); MiniLM vs paragraph."""
+    import torch
+
+    from conceptpoc.codec.jepa_codec import JepaCodec
+    from conceptpoc.jepa.tokenizer import Tokenizer
+    from conceptpoc.persistence import load_joint, load_writer
+    from experiments.sentence_pred.coarse_steer import slerp
+    from experiments.sentence_pred.forward_gen import (
+        _l2,
+        _load_minilm,
+        _render_sentence,
+        load_mdn_predictor,
+    )
+
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    predictor = load_mdn_predictor(mdn_path, device=device)
+    writer = load_writer(writer_path, device=device)
+    model, tok = load_joint(jepa_path, device=device)
+    tokenizer = (
+        tok if getattr(tok, "vocab_size", 0) == writer.vocab_size else Tokenizer("gpt2")
+    )
+    minilm = _load_minilm()
+
+    held = np.asarray(corpus.held_doc_ids, dtype=np.int64)
+    rng = np.random.RandomState(seed)
+    items: list[dict] = []
+    for doc_id in held:
+        s, e = corpus.doc_slice(int(doc_id))
+        n = e - s
+        if n < g + 1:
+            continue
+        # non-overlapping first G-block that has a previous sentence
+        # use sentences [1:1+G] so prefix = sentences[0]
+        if n < g + 1:
+            continue
+        start = 1
+        idxs = list(range(s + start, s + start + g))
+        vecs = corpus.sent_vecs[idxs]
+        texts = [corpus.sentences[i] for i in idxs]
+        prefix = corpus.sentences[s + start - 1]
+        para_text = " ".join(texts)
+        target_i = idxs[g // 2]  # mid sentence of block
+        items.append(
+            {
+                "prefix": prefix,
+                "para_text": para_text,
+                "z_same": _l2_normalize(corpus.sent_vecs[target_i]),
+                "centroid": _mean_pool_normalize(vecs),
+                "ctx_vecs": corpus.sent_vecs[max(s, target_i - 8) : target_i],
+            }
+        )
+    rng.shuffle(items)
+    items = items[:n_items]
+    if len(items) < n_items:
+        print(f"[P1] warning: only {len(items)} paragraph items available", flush=True)
+
+    scores = {"same": [], "pooled": [], "slerp": []}
+    for i, it in enumerate(items):
+        if (i + 1) % 25 == 0:
+            print(f"[P1] item {i + 1}/{len(items)}", flush=True)
+        para_emb = _l2(np.asarray(minilm.encode([it["para_text"]]), dtype=np.float32)[0])
+        # MDN sample from context preceding target
+        ctx_np = it["ctx_vecs"]
+        if ctx_np.shape[0] == 0:
+            ctx_np = it["z_same"][None, :]
+        ctx = torch.from_numpy(ctx_np.astype(np.float32)).unsqueeze(0).to(device)
+        pad = torch.zeros(1, ctx.size(1), dtype=torch.bool, device=device)
+        with torch.no_grad():
+            samp = predictor.sample(ctx, pad, n_samples=1, temperature=1.0)
+            mdn_s = samp[:, 0, :]
+            centroid_t = torch.from_numpy(it["centroid"][None, :]).to(device)
+            slerp_c = slerp(centroid_t, mdn_s, 0.35)
+
+        concepts = {
+            "same": torch.from_numpy(it["z_same"][None, :]).to(device),
+            "pooled": torch.from_numpy(it["centroid"][None, :]).to(device),
+            "slerp": slerp_c,
+        }
+        for name, concept in concepts.items():
+            text = _render_sentence(
+                writer,
+                tokenizer,
+                concept,
+                it["prefix"],
+                temperature=0.8,
+                top_k=50,
+                max_tokens=96,
+            )
+            rend_emb = _l2(np.asarray(minilm.encode([text]), dtype=np.float32)[0])
+            scores[name].append(float(np.dot(rend_emb, para_emb)))
+
+    means = {k: float(np.mean(v)) if v else float("nan") for k, v in scores.items()}
+    medians = {k: float(np.median(v)) if v else float("nan") for k, v in scores.items()}
+    pooled_pass = bool(means["pooled"] >= 0.25)
+    pooled_kill = bool(means["pooled"] <= 0.10)
+
+    return {
+        "probe": "P1",
+        "n_items": len(items),
+        "G": g,
+        "device": device,
+        "mean_cos": means,
+        "median_cos": medians,
+        "verdict": "PASS" if pooled_pass else ("KILL" if pooled_kill else "FAIL"),
+        "pass": pooled_pass,
+        "kill": pooled_kill,
+        "rules": {
+            "pass_if": "pooled mean MiniLM cos(render, paragraph) >= 0.25",
+            "kill_if": "pooled <= 0.10",
+            "reference_note": "same-sentence concept-only renderability historically ~0.395",
+        },
+        "recommendation": (
+            "anchor_source=fed, eta default ok"
+            if pooled_pass
+            else (
+                "prefer anchor_source=concept and/or eta>=0.5; consider v2b dual-FiLM"
+                if pooled_kill
+                else "pooled marginal; ablate anchor_source=concept"
+            )
+        ),
+    }
+
+
+def print_p2(results: dict) -> None:
+    print("=" * 72)
+    print("P2 — Concept-space anchored rollout (no writer)")
+    print(f"seeds={results['n_seeds']} steps={results['steps']} device={results['device']}")
+    print("=" * 72)
+    print(
+        f"  median cos(concept_8, a0) flat     = {_fmt(results['median_cos_k8_flat'])}"
+    )
+    print(
+        f"  median cos(concept_8, a0) anchored = {_fmt(results['median_cos_k8_anchored'])}"
+    )
+    print(
+        f"  delta (anchored - flat)            = {_fmt(results['delta_anchored_minus_flat'])}"
+    )
+    print(f"  verdict: {results['verdict']}  (PASS if anc>=flat+0.20 and anc>=0.50)")
+    print("=" * 72)
+
+
+def print_p1(results: dict) -> None:
+    print("=" * 72)
+    print("P1 — FiLM legibility of pooled/slerped concepts")
+    print(f"n_items={results['n_items']} G={results['G']} device={results['device']}")
+    print("=" * 72)
+    for name in ("same", "pooled", "slerp"):
+        print(
+            f"  {name:<8} mean={_fmt(results['mean_cos'][name])}  "
+            f"median={_fmt(results['median_cos'][name])}"
+        )
+    print(f"  verdict: {results['verdict']}  (PASS if pooled>=0.25; KILL if <=0.10)")
+    print(f"  recommendation: {results['recommendation']}")
+    print("=" * 72)
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Coarse-steer probes (Fable §7)")
-    p.add_argument("--probe", required=True, choices=["P0"], help="Probe id")
+    p.add_argument("--probe", required=True, choices=["P0", "P1", "P2"], help="Probe id")
     p.add_argument("--corpus", default=DEFAULT_CORPUS, help="SentenceCorpus cache dir")
-    p.add_argument("--out", default=DEFAULT_OUT, help="JSON output path")
+    p.add_argument("--out", default=None, help="JSON output path")
     p.add_argument("--max-held-docs", type=int, default=500)
     p.add_argument("--seed", type=int, default=1234)
+    p.add_argument("--mdn", default=DEFAULT_MDN)
+    p.add_argument("--writer", default=DEFAULT_WRITER)
+    p.add_argument("--jepa", default=DEFAULT_JEPA)
+    p.add_argument("--seeds-json", default=SEEDS_PATH)
+    p.add_argument("--n-seeds", type=int, default=20)
+    p.add_argument("--n-items", type=int, default=200)
+    p.add_argument("--steps", type=int, default=8)
+    p.add_argument("--device", default="auto")
     args = p.parse_args()
-
-    if args.probe != "P0":
-        raise SystemExit(f"Unsupported probe: {args.probe}")
 
     corpus_path = Path(args.corpus)
     print(f"Loading corpus from {corpus_path} ...", flush=True)
@@ -331,16 +651,66 @@ def main() -> None:
         flush=True,
     )
 
-    results = run_p0(corpus, max_held_docs=args.max_held_docs, seed=args.seed)
-    results["corpus"] = str(corpus_path)
+    if args.probe == "P0":
+        results = run_p0(corpus, max_held_docs=args.max_held_docs, seed=args.seed)
+        results["corpus"] = str(corpus_path)
+        out_path = Path(args.out or "artifacts/sentence_pred/coarse_steer/probes_P0.json")
+        print_p0_table(results)
+    elif args.probe == "P2":
+        results = run_p2(
+            corpus,
+            mdn_path=args.mdn,
+            seeds_path=args.seeds_json,
+            device=args.device,
+            steps=args.steps,
+            n_seeds=args.n_seeds,
+        )
+        out_path = Path(args.out or "artifacts/sentence_pred/coarse_steer/probes_P12.json")
+        # merge with existing P1 if present
+        if out_path.is_file():
+            try:
+                prev = json.loads(out_path.read_text(encoding="utf-8"))
+                if isinstance(prev, dict) and "P1" in prev:
+                    results = {"P1": prev["P1"], "P2": results}
+                elif isinstance(prev, dict) and prev.get("probe") == "P1":
+                    results = {"P1": prev, "P2": results}
+                else:
+                    results = {"P2": results}
+            except Exception:
+                results = {"P2": results}
+        else:
+            results = {"P2": results}
+        print_p2(results["P2"] if "P2" in results else results)
+    else:  # P1
+        results = run_p1(
+            corpus,
+            mdn_path=args.mdn,
+            writer_path=args.writer,
+            jepa_path=args.jepa,
+            device=args.device,
+            n_items=args.n_items,
+            seed=args.seed,
+        )
+        out_path = Path(args.out or "artifacts/sentence_pred/coarse_steer/probes_P12.json")
+        if out_path.is_file():
+            try:
+                prev = json.loads(out_path.read_text(encoding="utf-8"))
+                if isinstance(prev, dict) and "P2" in prev:
+                    results = {"P1": results, "P2": prev["P2"]}
+                elif isinstance(prev, dict) and prev.get("probe") == "P2":
+                    results = {"P1": results, "P2": prev}
+                else:
+                    results = {"P1": results}
+            except Exception:
+                results = {"P1": results}
+        else:
+            results = {"P1": results}
+        print_p1(results["P1"] if "P1" in results else results)
 
-    out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)
         f.write("\n")
-
-    print_p0_table(results)
     print(f"Wrote {out_path}")
 
 
