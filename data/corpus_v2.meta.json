@@ -1,0 +1,11 @@
+{
+  "source": "wikitext-103",
+  "out": "data/corpus_v2.txt",
+  "n_docs": 27099,
+  "n_paragraphs": 262414,
+  "n_sentences": 3640878,
+  "median_paragraphs_per_doc": 8.0,
+  "median_sentences_per_doc": 102.0,
+  "label": "WikiText-103-raw-v1 (real articles)",
+  "elapsed_s": 64.11
+}
