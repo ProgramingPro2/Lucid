@@ -3,7 +3,7 @@
   "codec": {
     "kind": "jepa",
     "device": "auto",
-    "jepa_checkpoint": "artifacts/jepa_v3_128t/jepa/joint_robust.pt"
+    "jepa_checkpoint": "artifacts/jepa_repair_1m/jepa/joint.pt"
   },
   "data": {
     "corpus_path": "data/corpus_1m.txt"
@@ -26,7 +26,7 @@
     "steps_per_epoch": 2000,
     "gradient_acc": 8,
     "phase1_checkpoint": "artifacts/writer_p1/writer_p1.pt",
-    "jepa_checkpoint": "artifacts/jepa_v3_128t/jepa/joint_robust.pt",
+    "jepa_checkpoint": "artifacts/jepa_repair_1m/jepa/joint.pt",
     "db_path": "artifacts/writer_p25/train.db",
     "run_id": 0,
     "use_concept": true,
