@@ -43,10 +43,11 @@ class SoftPrefixAdapter(nn.Module):
         nn.init.zeros_(self.fc2.bias)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-        """z: (B, z_dim) → soft prefix (B, K, d_model)."""
+        """z: (B, z_dim) → soft prefix (B, K, d_model). Always computes in fp32."""
         if z.ndim != 2 or z.size(-1) != self.z_dim:
             raise ValueError(f"expected z (B,{self.z_dim}), got {tuple(z.shape)}")
-        h = F.gelu(self.fc1(self.ln(z)))
+        z32 = z.float()
+        h = F.gelu(self.fc1(self.ln(z32)))
         out = self.fc2(h)
         return out.view(z.size(0), self.n_prefix, self.d_model)
 
@@ -186,16 +187,21 @@ def build_inputs_embeds(
     """
     embed = backbone.get_input_embeddings()
     tok_emb = embed(input_ids)  # (B, L, D)
-    prefix = adapter(z.to(dtype=torch.float32))  # keep MLP in fp32
+    # Keep adapter MLP in fp32 for stable grads under bf16/4-bit.
+    prefix = adapter(z.float())
     prefix = prefix.to(dtype=tok_emb.dtype)
     # Bound soft-prefix magnitude so CE stays finite under bf16.
     prefix = torch.clamp(prefix, -10.0, 10.0)
     if drop_mask is not None:
         prefix = prefix * (~drop_mask).to(dtype=prefix.dtype).view(-1, 1, 1)
     # Ensure grad reaches the adapter through the concat (kbit training).
+    # Do not requires_grad_(True) on token embeds — that retains a huge graph.
     if not tok_emb.requires_grad:
         tok_emb = tok_emb.detach()
     out = torch.cat([prefix, tok_emb], dim=1)
+    # Guard against rare non-finite embeds before the backbone sees them.
+    if not torch.isfinite(out).all():
+        out = torch.nan_to_num(out, nan=0.0, posinf=10.0, neginf=-10.0)
     return out
 
 

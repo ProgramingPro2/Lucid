@@ -278,9 +278,21 @@ def _grads_finite(params: list[nn.Parameter]) -> bool:
     for p in params:
         if p.grad is None:
             continue
-        if not torch.isfinite(p.grad).all().item():
+        if not bool(torch.isfinite(p.grad).all().item()):
             return False
     return True
+
+
+def _sanitize_grads(params: list[nn.Parameter]) -> int:
+    """Replace non-finite grads with 0. Returns count of params that had bad grads."""
+    n_bad = 0
+    for p in params:
+        if p.grad is None:
+            continue
+        if not bool(torch.isfinite(p.grad).all().item()):
+            n_bad += 1
+            p.grad = torch.nan_to_num(p.grad, nan=0.0, posinf=0.0, neginf=0.0)
+    return n_bad
 
 
 def _resolve_backbone(cfg: dict[str, Any], device: torch.device) -> tuple[Any, Any, str]:
@@ -588,19 +600,6 @@ def eval_sample_log(
     return rows
 
 
-def _trainable_params(model: nn.Module) -> list[nn.Parameter]:
-    return [p for p in model.parameters() if p.requires_grad]
-
-
-def _grads_finite(params: list[nn.Parameter]) -> bool:
-    for p in params:
-        if p.grad is None:
-            continue
-        if not bool(torch.isfinite(p.grad).all().item()):
-            return False
-    return True
-
-
 def train(
     cfg: dict[str, Any],
     *,
@@ -847,6 +846,17 @@ def train(
                 t3 = time.perf_counter()
                 loss = raw_loss / grad_accum
                 loss.backward()
+                # Soft-prefix + 4-bit can yield finite CE but non-finite grads on a
+                # subset of LoRA/adapter params; sanitize per-micro so one bad
+                # micro does not poison the whole accum window / opt.step.
+                n_bad = _sanitize_grads(trainable)
+                if n_bad:
+                    grad_nan_skips += 1
+                    if grad_nan_skips <= 20 or grad_nan_skips % 50 == 0:
+                        log(
+                            f"GRAD_SANITIZE micro_bi={bi} step={global_step} "
+                            f"bad_params={n_bad} total_sanitizes={grad_nan_skips}"
+                        )
                 if device.type == "cuda" and profile:
                     torch.cuda.synchronize()
                 t_bwd = (time.perf_counter() - t3) * 1000.0
@@ -861,6 +871,8 @@ def train(
                 did_step = False
                 if micro >= grad_accum:
                     t4 = time.perf_counter()
+                    # Final safety pass before clip/step
+                    _sanitize_grads(trainable)
                     if not _grads_finite(trainable):
                         grad_nan_skips += 1
                         opt.zero_grad(set_to_none=True)
@@ -927,6 +939,25 @@ def train(
                                 )
                             except Exception as e:  # noqa: BLE001
                                 log(f"eval_sample_log failed: {e}")
+
+                        ckpt_every = int(cfg.get("ckpt_every_steps", 50))
+                        if ckpt_every > 0 and global_step % ckpt_every == 0:
+                            meta = {
+                                "backbone": backbone_name,
+                                "epoch": epoch,
+                                "step": global_step,
+                                "loss_last": history[-1]["loss"] if history else None,
+                            }
+                            ckpt_path = out_dir / f"checkpoint_step{global_step:06d}.pt"
+                            flat_holder.set_state(_flat_trainable_state(model, global_step))
+                            db.record_epoch(run_id, epoch, meta)
+                            db.save_checkpoint(
+                                run_id, epoch, flat_holder, opt, device="cpu"
+                            )
+                            _save_pt(
+                                ckpt_path, model, opt, epoch, global_step, meta
+                            )
+                            log(f"checkpoint step={global_step} → {ckpt_path}")
 
                 if profile and profile_every > 0 and (
                     bi % profile_every == 0 or did_step or bi < 5
