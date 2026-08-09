@@ -66,7 +66,11 @@ def _seed_all(seed: int) -> None:
 
 
 class ParaPairDataset(Dataset):
-    """Consecutive paragraph pairs (prev, target, z_target) from zbank + corpus."""
+    """Consecutive paragraph pairs (prev, target, z_target) from zbank + corpus.
+
+    Text is kept for eval; optional pretoken cache stores input_ids/labels so
+    training __getitem__ does not re-tokenize on every access.
+    """
 
     def __init__(
         self,
@@ -111,11 +115,14 @@ class ParaPairDataset(Dataset):
                 zi = z[index[key]]
                 items.append((prev, tgt, zi.astype(np.float32), di, pi))
         self.items = items
+        self._tok_cache: list[dict[str, Any]] | None = None
 
     def __len__(self) -> int:
         return len(self.items)
 
     def __getitem__(self, i: int) -> dict[str, Any]:
+        if self._tok_cache is not None:
+            return self._tok_cache[i]
         prev, tgt, z, di, pi = self.items[i]
         return {
             "prev": prev,
@@ -125,21 +132,134 @@ class ParaPairDataset(Dataset):
             "para_idx": pi,
         }
 
+    def build_pretoken_cache(self, tokenizer, cfg: dict[str, Any], cache_path: Path | None = None) -> None:
+        """Pre-tokenize all pairs once; assemble tensors in __getitem__ only."""
+        cache_path = Path(cache_path) if cache_path is not None else None
+        if cache_path is not None and cache_path.exists():
+            print(f"[stageA] loading pretoken cache {cache_path}...", flush=True)
+            blob = torch.load(cache_path, map_location="cpu", weights_only=False)
+            self._tok_cache = blob["rows"]
+            if len(self._tok_cache) != len(self.items):
+                print(
+                    f"[stageA] pretoken cache len mismatch "
+                    f"{len(self._tok_cache)} vs {len(self.items)}; rebuilding",
+                    flush=True,
+                )
+                self._tok_cache = None
+            else:
+                print(f"[stageA] pretoken cache ready n={len(self._tok_cache)}", flush=True)
+                return
+
+        print(f"[stageA] pre-tokenizing {len(self.items)} pairs...", flush=True)
+        t0 = time.time()
+        max_prev = int(cfg["max_prev_tokens"])
+        max_target = int(cfg["max_target_tokens"])
+        ctx_max = int(cfg["ctx_max"])
+        n_prefix = int(cfg["n_prefix"])
+        rows: list[dict[str, Any]] = []
+        batch_n = 256
+        for start in range(0, len(self.items), batch_n):
+            chunk = self.items[start : start + batch_n]
+            prev = [c[0] for c in chunk]
+            tgt = [c[1] for c in chunk]
+            packed = collate_prefix_batch(
+                tokenizer,
+                prev,
+                tgt,
+                max_prev=max_prev,
+                max_target=max_target,
+                ctx_max=ctx_max,
+                n_prefix=n_prefix,
+            )
+            for j, (pv, tg, zi, di, pi) in enumerate(chunk):
+                # Store unpadded row slices to keep cache compact.
+                L = int(packed["attention_mask"][j, n_prefix:].sum().item())
+                rows.append(
+                    {
+                        "prev": pv,
+                        "target": tg,
+                        "z": zi,
+                        "doc_id": di,
+                        "para_idx": pi,
+                        "input_ids": packed["input_ids"][j, :L].clone(),
+                        "prev_len": int(packed["prev_lens"][j].item()),
+                        "target_len": int(packed["target_lens"][j].item()),
+                        "cached": True,
+                    }
+                )
+            if (start // batch_n) % 50 == 0:
+                print(
+                    f"[stageA] pretoken {min(start + batch_n, len(self.items))}/{len(self.items)}",
+                    flush=True,
+                )
+        self._tok_cache = rows
+        if cache_path is not None:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save({"rows": rows}, cache_path)
+            print(
+                f"[stageA] wrote pretoken cache → {cache_path} "
+                f"in {time.time() - t0:.1f}s",
+                flush=True,
+            )
+        else:
+            print(f"[stageA] pretoken done in {time.time() - t0:.1f}s", flush=True)
+
 
 def _make_collate(tokenizer, cfg: dict[str, Any]):
+    n_prefix = int(cfg["n_prefix"])
+
     def _collate(batch: list[dict[str, Any]]) -> dict[str, Any]:
-        prev = [b["prev"] for b in batch]
-        tgt = [b["target"] for b in batch]
         z = torch.from_numpy(np.stack([b["z"] for b in batch], axis=0))
-        packed = collate_prefix_batch(
-            tokenizer,
-            prev,
-            tgt,
-            max_prev=int(cfg["max_prev_tokens"]),
-            max_target=int(cfg["max_target_tokens"]),
-            ctx_max=int(cfg["ctx_max"]),
-            n_prefix=int(cfg["n_prefix"]),
-        )
+        if batch and batch[0].get("cached"):
+            # Assemble from pre-tokenized ids (pad within micro-batch only).
+            bsz = len(batch)
+            lengths = [int(b["input_ids"].numel()) for b in batch]
+            max_l = max(lengths) if lengths else 0
+            pad_id = tokenizer.pad_token_id
+            if pad_id is None:
+                pad_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0
+            input_ids = torch.full((bsz, max_l), pad_id, dtype=torch.long)
+            text_attn = torch.zeros((bsz, max_l), dtype=torch.long)
+            prev_lens = torch.zeros(bsz, dtype=torch.long)
+            tgt_lens = torch.zeros(bsz, dtype=torch.long)
+            for i, b in enumerate(batch):
+                L = lengths[i]
+                if L:
+                    input_ids[i, :L] = b["input_ids"]
+                    text_attn[i, :L] = 1
+                prev_lens[i] = int(b["prev_len"])
+                tgt_lens[i] = int(b["target_len"])
+            attn = torch.cat([torch.ones((bsz, n_prefix), dtype=torch.long), text_attn], dim=1)
+            labels = torch.full((bsz, n_prefix + max_l), -100, dtype=torch.long)
+            for i, b in enumerate(batch):
+                pl, tl = int(b["prev_len"]), int(b["target_len"])
+                if tl <= 0:
+                    continue
+                start = n_prefix + pl
+                end = start + tl
+                labels[i, start:end] = input_ids[i, pl : pl + tl]
+            packed = {
+                "input_ids": input_ids,
+                "attention_mask": attn,
+                "labels": labels,
+                "prev_lens": prev_lens,
+                "target_lens": tgt_lens,
+                "n_prefix": torch.tensor(n_prefix, dtype=torch.long),
+            }
+            prev = [b["prev"] for b in batch]
+            tgt = [b["target"] for b in batch]
+        else:
+            prev = [b["prev"] for b in batch]
+            tgt = [b["target"] for b in batch]
+            packed = collate_prefix_batch(
+                tokenizer,
+                prev,
+                tgt,
+                max_prev=int(cfg["max_prev_tokens"]),
+                max_target=int(cfg["max_target_tokens"]),
+                ctx_max=int(cfg["ctx_max"]),
+                n_prefix=n_prefix,
+            )
         packed["z"] = z
         packed["prev_text"] = prev
         packed["target_text"] = tgt
@@ -148,6 +268,19 @@ def _make_collate(tokenizer, cfg: dict[str, Any]):
         return packed
 
     return _collate
+
+
+def _trainable_params(model: nn.Module) -> list[nn.Parameter]:
+    return [p for p in model.parameters() if p.requires_grad]
+
+
+def _grads_finite(params: list[nn.Parameter]) -> bool:
+    for p in params:
+        if p.grad is None:
+            continue
+        if not torch.isfinite(p.grad).all().item():
+            return False
+    return True
 
 
 def _resolve_backbone(cfg: dict[str, Any], device: torch.device) -> tuple[Any, Any, str]:
@@ -455,14 +588,37 @@ def eval_sample_log(
     return rows
 
 
-def train(cfg: dict[str, Any], *, resume: bool = True, max_steps: int | None = None) -> dict[str, Any]:
+def _trainable_params(model: nn.Module) -> list[nn.Parameter]:
+    return [p for p in model.parameters() if p.requires_grad]
+
+
+def _grads_finite(params: list[nn.Parameter]) -> bool:
+    for p in params:
+        if p.grad is None:
+            continue
+        if not bool(torch.isfinite(p.grad).all().item()):
+            return False
+    return True
+
+
+def train(
+    cfg: dict[str, Any],
+    *,
+    resume: bool = True,
+    max_steps: int | None = None,
+    profile: bool = False,
+    skip_baseline: bool = False,
+    log_path: Path | None = None,
+) -> dict[str, Any]:
     _seed_all(int(cfg.get("seed", 42)))
     out_dir = _ROOT / cfg["out_dir"]
     out_dir.mkdir(parents=True, exist_ok=True)
-    log_path = out_dir / "train.log"
+    if log_path is None:
+        log_path = out_dir / "train.log"
+    else:
+        log_path = Path(log_path)
     device = _device("auto")
 
-    # Ensure zbank exists
     zbank = _ROOT / cfg["zbank"]
     if not zbank.exists():
         from experiments.pivot.encode_bank import build_bank
@@ -472,7 +628,7 @@ def train(cfg: dict[str, Any], *, resume: bool = True, max_steps: int | None = N
 
     print(f"[stageA] loading train pairs from {zbank}...", flush=True)
     train_ds = ParaPairDataset(_ROOT / cfg["corpus"], zbank, split="train")
-    print(f"[stageA] loading held pairs...", flush=True)
+    print("[stageA] loading held pairs...", flush=True)
     held_ds = ParaPairDataset(_ROOT / cfg["corpus"], zbank, split="held")
     n_paras = len(train_ds)
     print(
@@ -502,10 +658,18 @@ def train(cfg: dict[str, Any], *, resume: bool = True, max_steps: int | None = N
     model = StageAModel(backbone, adapter)
     model.train()
 
+    if bool(cfg.get("pretokenize", True)):
+        cache_name = (
+            f"pretok_{backbone_name.replace('/', '_')}"
+            f"_ctx{cfg['ctx_max']}_np{cfg['n_prefix']}.pt"
+        )
+        train_ds.build_pretoken_cache(tokenizer, cfg, cache_path=out_dir / cache_name)
+
     opt = torch.optim.AdamW(
         _param_groups(model, cfg),
         weight_decay=float(cfg.get("weight_decay", 0.01)),
     )
+    trainable = _trainable_params(model)
 
     db_path = _ROOT / cfg.get("db_path", str(out_dir / "checkpoints.sqlite"))
     db = CheckpointDB(db_path, keep_last=3)
@@ -527,13 +691,16 @@ def train(cfg: dict[str, Any], *, resume: bool = True, max_steps: int | None = N
         start_epoch, global_step = _load_resume(db, run_id, model, opt, device)
 
     gate = _maybe_gate(device, bool(cfg.get("gpu_gate", True)))
+    nw = int(cfg.get("num_workers", 0))
     loader = DataLoader(
         train_ds,
         batch_size=int(cfg.get("micro_batch", 1)),
         shuffle=True,
-        num_workers=0,
+        num_workers=nw,
         collate_fn=_make_collate(tokenizer, cfg),
         drop_last=True,
+        pin_memory=(device.type == "cuda"),
+        persistent_workers=(nw > 0),
     )
     grad_accum = int(cfg.get("grad_accum", 64))
     epochs = int(cfg.get("epochs", 2))
@@ -542,32 +709,44 @@ def train(cfg: dict[str, Any], *, resume: bool = True, max_steps: int | None = N
     log_every = int(cfg.get("log_every", 20))
     eval_every = int(cfg.get("eval_every_steps", 500))
     clip = float(cfg.get("grad_clip", 1.0))
+    profile_every = int(cfg.get("profile_every_micro", 1 if profile else 0))
+    micro_log_every = int(cfg.get("micro_log_every", 16 if profile else 0))
 
-    # Cheap no-condition CE baseline (prefix always dropped) before training.
-    baseline_losses: list[float] = []
-    model.eval()
-    with torch.no_grad():
-        for i, batch in enumerate(loader):
-            if i >= 32:
-                break
-            z = batch["z"].to(device)
-            drop = torch.ones(z.size(0), dtype=torch.bool, device=device)
-            out = model(
-                z,
-                batch["input_ids"].to(device),
-                batch["attention_mask"].to(device),
-                batch["labels"].to(device),
-                drop_mask=drop,
+    baseline_ce = float("nan")
+    if not skip_baseline:
+        baseline_losses: list[float] = []
+        model.eval()
+        with torch.no_grad():
+            for i, batch in enumerate(loader):
+                if i >= 32:
+                    break
+                z = batch["z"].to(device)
+                drop = torch.ones(z.size(0), dtype=torch.bool, device=device)
+                out = model(
+                    z,
+                    batch["input_ids"].to(device),
+                    batch["attention_mask"].to(device),
+                    batch["labels"].to(device),
+                    drop_mask=drop,
+                )
+                baseline_losses.append(float(out.loss.item()))
+        baseline_ce = float(np.mean(baseline_losses)) if baseline_losses else float("nan")
+        model.train()
+        (out_dir / "baseline_uncond.json").write_text(
+            json.dumps(
+                {"n": len(baseline_losses), "ce": baseline_ce, "backbone": backbone_name},
+                indent=2,
             )
-            baseline_losses.append(float(out.loss.item()))
-    baseline_ce = float(np.mean(baseline_losses)) if baseline_losses else float("nan")
-    model.train()
-    (out_dir / "baseline_uncond.json").write_text(
-        json.dumps({"n": len(baseline_losses), "ce": baseline_ce, "backbone": backbone_name}, indent=2)
-        + "\n"
-    )
+            + "\n"
+        )
+    else:
+        bpath = out_dir / "baseline_uncond.json"
+        if bpath.exists():
+            try:
+                baseline_ce = float(json.loads(bpath.read_text())["ce"])
+            except Exception:  # noqa: BLE001
+                baseline_ce = float("nan")
 
-    # Optional frozen JEPA for eval re-encode (CPU to save VRAM)
     codec: JepaCodec | None = None
     try:
         jepa_path = _ROOT / cfg.get("jepa", "artifacts/jepa_repair_1m/jepa/joint.pt")
@@ -577,7 +756,10 @@ def train(cfg: dict[str, Any], *, resume: bool = True, max_steps: int | None = N
         print(f"[stageA] JEPA codec for eval skipped: {e}", flush=True)
 
     history: list[dict[str, Any]] = []
+    profile_rows: list[dict[str, Any]] = []
     stop = {"flag": False}
+    nan_skips = 0
+    grad_nan_skips = 0
 
     def _sig(_s, _f):
         stop["flag"] = True
@@ -599,82 +781,178 @@ def train(cfg: dict[str, Any], *, resume: bool = True, max_steps: int | None = N
             f"train_pairs={n_paras} epochs={epochs} "
             f"eff_batch={grad_accum * int(cfg.get('micro_batch', 1))} "
             f"resume_epoch={start_epoch} step={global_step} vram={_vram_gb():.2f}GB "
-            f"baseline_uncond_ce={baseline_ce:.4f}"
+            f"baseline_uncond_ce={baseline_ce:.4f} kappa={kappa} "
+            f"profile={int(profile)} pretoken={int(train_ds._tok_cache is not None)}"
         )
 
         for epoch in range(start_epoch, epochs):
             model.train()
             running = 0.0
-            n_tok = 0
+            n_loss = 0
+            tok_window = 0
+            t_window = time.perf_counter()
             opt.zero_grad(set_to_none=True)
             micro = 0
-            for bi, batch in enumerate(loader):
+            loader_iter = iter(loader)
+            bi = -1
+            while True:
+                bi += 1
                 if stop["flag"] or (max_steps is not None and global_step >= max_steps):
                     break
+
+                t0 = time.perf_counter()
+                try:
+                    batch = next(loader_iter)
+                except StopIteration:
+                    break
+                t_data = (time.perf_counter() - t0) * 1000.0
+
                 if gate is not None:
                     gate.step(model, opt)
 
-                z = batch["z"].to(device)
+                t1 = time.perf_counter()
+                z = batch["z"].to(device, non_blocking=True)
                 z_tilde = fiber_corrupt(z, kappa=kappa)
-                if not torch.isfinite(z_tilde).all():
+                z_ok = bool(torch.isfinite(z_tilde).all().item())
+                if not z_ok:
                     z_tilde = F.normalize(z.float(), dim=-1)
                 drop = torch.rand(z.size(0), device=device) < drop_p
-                input_ids = batch["input_ids"].to(device)
-                attn = batch["attention_mask"].to(device)
-                labels = batch["labels"].to(device)
-                if int((labels != -100).sum()) == 0:
+                input_ids = batch["input_ids"].to(device, non_blocking=True)
+                attn = batch["attention_mask"].to(device, non_blocking=True)
+                labels = batch["labels"].to(device, non_blocking=True)
+                n_tgt_tok = int((labels != -100).sum().item())
+                if n_tgt_tok == 0:
                     continue
+                t_fiber = (time.perf_counter() - t1) * 1000.0
 
+                t2 = time.perf_counter()
                 out = model(z_tilde, input_ids, attn, labels, drop_mask=drop)
                 raw_loss = out.loss
-                if raw_loss is None or not torch.isfinite(raw_loss):
+                if device.type == "cuda" and profile:
+                    torch.cuda.synchronize()
+                t_fwd = (time.perf_counter() - t2) * 1000.0
+
+                if raw_loss is None or not bool(torch.isfinite(raw_loss).item()):
+                    nan_skips += 1
                     opt.zero_grad(set_to_none=True)
                     micro = 0
+                    if nan_skips <= 20 or nan_skips % 50 == 0:
+                        log(
+                            f"NAN_SKIP micro_bi={bi} step={global_step} "
+                            f"nan_skips={nan_skips} z_finite={int(z_ok)} "
+                            f"(raw_loss guard; accumulation reset)"
+                        )
                     continue
+
+                t3 = time.perf_counter()
                 loss = raw_loss / grad_accum
                 loss.backward()
+                if device.type == "cuda" and profile:
+                    torch.cuda.synchronize()
+                t_bwd = (time.perf_counter() - t3) * 1000.0
                 micro += 1
 
-                running += float(raw_loss.detach().item())
-                n_tok += 1
+                loss_val = float(raw_loss.detach().item())
+                running += loss_val
+                n_loss += 1
+                tok_window += n_tgt_tok
 
+                t_opt = 0.0
+                did_step = False
                 if micro >= grad_accum:
-                    nn.utils.clip_grad_norm_(
-                        [p for p in model.parameters() if p.requires_grad], clip
-                    )
-                    opt.step()
-                    opt.zero_grad(set_to_none=True)
-                    micro = 0
-                    global_step += 1
-
-                    if global_step % log_every == 0 or global_step <= 5:
-                        avg = running / max(n_tok, 1)
+                    t4 = time.perf_counter()
+                    if not _grads_finite(trainable):
+                        grad_nan_skips += 1
+                        opt.zero_grad(set_to_none=True)
+                        micro = 0
                         log(
-                            f"epoch={epoch} step={global_step} loss={avg:.4f} "
-                            f"vram={_vram_gb():.2f}GB"
+                            f"GRAD_NAN_SKIP step_pending={global_step + 1} "
+                            f"grad_nan_skips={grad_nan_skips} "
+                            f"(optimizer step aborted; grads cleared)"
                         )
-                        history.append(
-                            {"epoch": epoch, "step": global_step, "loss": avg}
-                        )
-                        running = 0.0
-                        n_tok = 0
+                        t_opt = (time.perf_counter() - t4) * 1000.0
+                    else:
+                        nn.utils.clip_grad_norm_(trainable, clip)
+                        opt.step()
+                        opt.zero_grad(set_to_none=True)
+                        micro = 0
+                        global_step += 1
+                        did_step = True
+                        if device.type == "cuda" and profile:
+                            torch.cuda.synchronize()
+                        t_opt = (time.perf_counter() - t4) * 1000.0
 
-                    if global_step % eval_every == 0:
-                        eval_path = out_dir / f"eval_samples_step{global_step:06d}.jsonl"
-                        try:
-                            eval_sample_log(
-                                model,
-                                tokenizer,
-                                codec,
-                                held_ds,
-                                eval_path,
-                                n=int(cfg.get("eval_n", 64)),
-                                device=device,
+                        wall = time.perf_counter() - t_window
+                        tps = tok_window / max(wall, 1e-6)
+                        avg = running / max(n_loss, 1)
+                        if global_step % log_every == 0 or global_step <= 5 or profile:
+                            log(
+                                f"epoch={epoch} step={global_step} loss={avg:.4f} "
+                                f"tok/s={tps:.1f} step_ms={wall * 1000:.0f} "
+                                f"vram={_vram_gb():.2f}GB "
+                                f"nan_skips={nan_skips} grad_nan_skips={grad_nan_skips}"
+                                + (
+                                    f" (baseline_uncond_ce={baseline_ce:.4f})"
+                                    if global_step <= 5
+                                    else ""
+                                )
                             )
-                        except Exception as e:  # noqa: BLE001
-                            log(f"eval_sample_log failed: {e}")
+                            history.append(
+                                {
+                                    "epoch": epoch,
+                                    "step": global_step,
+                                    "loss": avg,
+                                    "tok_s": tps,
+                                    "step_ms": wall * 1000.0,
+                                    "vram_gb": _vram_gb(),
+                                }
+                            )
+                            running = 0.0
+                            n_loss = 0
+                            tok_window = 0
+                            t_window = time.perf_counter()
 
-            # end epoch: checkpoint
+                        if global_step % eval_every == 0:
+                            eval_path = out_dir / f"eval_samples_step{global_step:06d}.jsonl"
+                            try:
+                                log(f"eval_sample_log begin n={cfg.get('eval_n', 64)}")
+                                eval_sample_log(
+                                    model,
+                                    tokenizer,
+                                    codec,
+                                    held_ds,
+                                    eval_path,
+                                    n=int(cfg.get("eval_n", 64)),
+                                    device=device,
+                                )
+                            except Exception as e:  # noqa: BLE001
+                                log(f"eval_sample_log failed: {e}")
+
+                if profile and profile_every > 0 and (
+                    bi % profile_every == 0 or did_step or bi < 5
+                ):
+                    row = {
+                        "bi": bi,
+                        "step": global_step,
+                        "micro": micro,
+                        "data_ms": t_data,
+                        "fiber_ms": t_fiber,
+                        "fwd_ms": t_fwd,
+                        "bwd_ms": t_bwd,
+                        "opt_ms": t_opt,
+                        "loss": loss_val,
+                        "tgt_tok": n_tgt_tok,
+                        "did_step": did_step,
+                    }
+                    profile_rows.append(row)
+                    if bi < 8 or did_step or (micro_log_every and bi % micro_log_every == 0):
+                        log(
+                            f"prof bi={bi} step={global_step} micro={micro}/"
+                            f"{grad_accum} data_ms={t_data:.1f} fiber_ms={t_fiber:.1f} "
+                            f"fwd_ms={t_fwd:.1f} bwd_ms={t_bwd:.1f} opt_ms={t_opt:.1f} "
+                            f"loss={loss_val:.4f} tgt_tok={n_tgt_tok}"
+                        )
+
             meta = {
                 "backbone": backbone_name,
                 "epoch": epoch,
@@ -688,37 +966,44 @@ def train(cfg: dict[str, Any], *, resume: bool = True, max_steps: int | None = N
             _save_pt(ckpt_path, model, opt, epoch, global_step, meta)
             log(f"checkpoint epoch={epoch} → {ckpt_path}")
 
-            # Epoch-end eval sample log
-            eval_path = out_dir / f"eval_samples_epoch{epoch:02d}.jsonl"
-            try:
-                eval_sample_log(
-                    model,
-                    tokenizer,
-                    codec,
-                    held_ds,
-                    eval_path,
-                    n=int(cfg.get("eval_n", 64)),
-                    device=device,
-                )
-            except Exception as e:  # noqa: BLE001
-                log(f"epoch eval_sample_log failed: {e}")
+            do_epoch_eval = not profile and not (
+                max_steps is not None and global_step >= max_steps
+            )
+            if do_epoch_eval:
+                eval_path = out_dir / f"eval_samples_epoch{epoch:02d}.jsonl"
+                try:
+                    log(f"epoch eval_sample_log begin n={cfg.get('eval_n', 64)}")
+                    eval_sample_log(
+                        model,
+                        tokenizer,
+                        codec,
+                        held_ds,
+                        eval_path,
+                        n=int(cfg.get("eval_n", 64)),
+                        device=device,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    log(f"epoch eval_sample_log failed: {e}")
 
             if stop["flag"] or (max_steps is not None and global_step >= max_steps):
                 break
 
-        # Final pointer
         latest = out_dir / "checkpoint_latest.pt"
-        if (out_dir / f"checkpoint_epoch{max(start_epoch, epochs - 1):02d}.pt").exists():
-            import shutil
+        import shutil
 
-            src = out_dir / f"checkpoint_epoch{epochs - 1:02d}.pt"
-            # Prefer the highest existing epoch file
-            existing = sorted(out_dir.glob("checkpoint_epoch*.pt"))
-            if existing:
-                shutil.copy2(existing[-1], latest)
-        log(f"done elapsed_h={(time.time() - t_run) / 3600:.2f} steps={global_step}")
+        existing = sorted(out_dir.glob("checkpoint_epoch*.pt"))
+        if existing:
+            shutil.copy2(existing[-1], latest)
+        log(
+            f"done elapsed_h={(time.time() - t_run) / 3600:.2f} steps={global_step} "
+            f"nan_skips={nan_skips} grad_nan_skips={grad_nan_skips}"
+        )
 
     (out_dir / "history.json").write_text(json.dumps(history, indent=2) + "\n")
+    if profile_rows:
+        (out_dir / "profile_micros.json").write_text(
+            json.dumps(profile_rows, indent=2) + "\n"
+        )
     return {
         "run_id": run_id,
         "backbone": backbone_name,
@@ -726,6 +1011,9 @@ def train(cfg: dict[str, Any], *, resume: bool = True, max_steps: int | None = N
         "history": history,
         "out_dir": str(out_dir),
         "vram_gb": _vram_gb(),
+        "nan_skips": nan_skips,
+        "grad_nan_skips": grad_nan_skips,
+        "profile_rows": profile_rows,
     }
 
 
@@ -737,7 +1025,6 @@ def baseline_unconditioned_loss(
     zbank = _ROOT / cfg["zbank"]
     ds = ParaPairDataset(_ROOT / cfg["corpus"], zbank, split="train")
     backbone, tokenizer, name = _resolve_backbone(cfg, device)
-    # No LoRA — frozen 4-bit CE with zero prefix via a throwaway adapter
     adapter = SoftPrefixAdapter(
         z_dim=int(cfg["z_dim"]),
         d_model=int(getattr(backbone.config, "hidden_size", cfg["d_model"])),
@@ -769,7 +1056,10 @@ def baseline_unconditioned_loss(
             )
             losses.append(float(out.loss.item()))
     mean = float(np.mean(losses)) if losses else float("nan")
-    print(f"[stageA] no-condition baseline CE ({n_batches} batches, {name}): {mean:.4f}", flush=True)
+    print(
+        f"[stageA] no-condition baseline CE ({n_batches} batches, {name}): {mean:.4f}",
+        flush=True,
+    )
     del model, backbone
     if device.type == "cuda":
         torch.cuda.empty_cache()
@@ -783,15 +1073,31 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--max-steps", type=int, default=None)
     p.add_argument("--baseline-only", action="store_true")
     p.add_argument("--no-gpu-gate", action="store_true")
+    p.add_argument("--profile", action="store_true", help="Per-micro timing logs")
+    p.add_argument("--skip-baseline", action="store_true")
+    p.add_argument("--log-path", type=Path, default=None)
+    p.add_argument("--kappa", type=float, default=None)
+    p.add_argument("--no-pretokenize", action="store_true")
     args = p.parse_args(argv)
     print(f"[stageA] boot config={args.config} resume={not args.no_resume}", flush=True)
     cfg = _load_cfg(args.config)
     if args.no_gpu_gate:
         cfg["gpu_gate"] = False
+    if args.kappa is not None:
+        cfg["kappa_aug"] = float(args.kappa)
+    if args.no_pretokenize:
+        cfg["pretokenize"] = False
     if args.baseline_only:
         baseline_unconditioned_loss(cfg)
         return
-    train(cfg, resume=not args.no_resume, max_steps=args.max_steps)
+    train(
+        cfg,
+        resume=not args.no_resume,
+        max_steps=args.max_steps,
+        profile=args.profile,
+        skip_baseline=args.skip_baseline,
+        log_path=args.log_path,
+    )
 
 
 if __name__ == "__main__":
