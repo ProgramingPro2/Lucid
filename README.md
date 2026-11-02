@@ -162,3 +162,7 @@ Tests use a deterministic hashing codec and need no downloads or network.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) - design and data flow
 - [docs/PLAN.md](docs/PLAN.md) - scope and key decisions
 - [docs/LIMITATIONS.md](docs/LIMITATIONS.md) - what this does and does not do
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
