@@ -93,39 +93,43 @@ def harvest(
                 break
             print(f"[harvest] {server} {lo}..{hi}", flush=True)
             try:
-                docs = client.fetch(lo, hi, max_docs=remaining)
-            except Exception as exc:  # noqa: BLE001 - keep earlier windows
-                print(f"[harvest] window failed: {type(exc).__name__}: {exc}", flush=True)
+                for doc in client.iter_metadata(lo, hi):
+                    if counts["written"] >= max_docs:
+                        print("[harvest] reached --max-docs", flush=True)
+                        return counts
+                    counts["metadata"] += 1
+                    if doc.doc_id in done:
+                        counts["skipped_existing"] += 1
+                        continue
+                    allowed = doc.license in LICENSE_ALLOWLIST
+                    counts["licence_allowed"] += int(allowed)
+                    if fulltext and allowed and doc.meta.get("jatsxml"):
+                        doc = client.fetch_fulltext(doc)
+                    status = doc.meta.get("fulltext", "abstract_only")
+                    if status == "ok":
+                        counts["fulltext_ok"] += 1
+                    elif status == "abstract_only":
+                        counts["abstract_only"] += 1
+                    else:
+                        counts["fulltext_error"] += 1
+                    fh.write(json.dumps(asdict(doc)) + "\n")
+                    fh.flush()
+                    done.add(doc.doc_id)
+                    counts["written"] += 1
+                    if counts["written"] % 25 == 0:
+                        rate = counts["written"] / max(1e-9, time.time() - started)
+                        print(
+                            f"[harvest] written={counts['written']} "
+                            f"fulltext_ok={counts['fulltext_ok']} "
+                            f"{rate * 60:.1f} docs/min",
+                            flush=True,
+                        )
+            except Exception as exc:  # noqa: BLE001 - keep earlier documents
+                print(
+                    f"[harvest] window stopped: {type(exc).__name__}: {exc}",
+                    flush=True,
+                )
                 continue
-            for doc in docs:
-                counts["metadata"] += 1
-                if doc.doc_id in done:
-                    counts["skipped_existing"] += 1
-                    continue
-                allowed = doc.license in LICENSE_ALLOWLIST
-                counts["licence_allowed"] += int(allowed)
-                status = doc.meta.get("fulltext", "abstract_only")
-                if status == "ok":
-                    counts["fulltext_ok"] += 1
-                elif status == "abstract_only":
-                    counts["abstract_only"] += 1
-                else:
-                    counts["fulltext_error"] += 1
-                fh.write(json.dumps(asdict(doc)) + "\n")
-                fh.flush()
-                done.add(doc.doc_id)
-                counts["written"] += 1
-                if counts["written"] % 25 == 0:
-                    rate = counts["written"] / max(1e-9, time.time() - started)
-                    print(
-                        f"[harvest] written={counts['written']} "
-                        f"fulltext_ok={counts['fulltext_ok']} "
-                        f"{rate * 60:.1f} docs/min",
-                        flush=True,
-                    )
-                if counts["written"] >= max_docs:
-                    print("[harvest] reached --max-docs", flush=True)
-                    return counts
     return counts
 
 

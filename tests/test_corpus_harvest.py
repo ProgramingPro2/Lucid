@@ -140,8 +140,8 @@ def test_harvest_resumes_without_duplicate_doc_ids(tmp_path, monkeypatch):
             kwargs["delay"] = 0.0
             super().__init__(**kwargs)
 
-        def fetch(self, since, until, max_docs=1000):
-            return docs[:max_docs]
+        def iter_metadata(self, since, until):
+            yield from docs
 
     monkeypatch.setattr(harvest_mod, "BioRxivClient", Fake)
     out = tmp_path / "harvest.jsonl"
@@ -156,14 +156,15 @@ def test_harvest_resumes_without_duplicate_doc_ids(tmp_path, monkeypatch):
         server="biorxiv", since=since, until=date.today().isoformat(),
         out=out, max_docs=2, delay=0.0,
     )
-    # The fake returns the same three docs in every weekly window; every one is
-    # recognised as already present and none is written twice.
+    # The fake returns the same three docs in every weekly window. The first run
+    # committed two; the second recognises both and writes only the third, so no
+    # doc id is ever written twice.
     assert second["skipped_existing"] >= 3
-    assert second["written"] == 0
+    assert second["written"] == 1
 
     lines = [json.loads(line) for line in out.read_text().splitlines()]
-    assert len(lines) == 2
-    assert len({r["doc_id"] for r in lines}) == 2
+    assert len(lines) == 3
+    assert len({r["doc_id"] for r in lines}) == 3
     assert set(lines[0]) >= {"doc_id", "source", "text", "sections", "license", "date"}
 
 

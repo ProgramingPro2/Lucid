@@ -298,13 +298,15 @@ CoT−direct gain is **≥ 0.10**.
 | Backbone | F1 | F2 | F3 | Mean | Gate |
 |---|---|---|---|---|---|
 | Qwen3-1.7B **Base** | 0.00 | +0.15 | +0.05 | +0.067 | **VOID** — CoT degenerates |
-| Qwen3-1.7B **instruct** | **+0.65** | **+0.35** | +0.05 | **+0.35** | **PASS** |
+| Qwen3-1.7B **instruct** | **+0.65** | **+0.40** | +0.05 | **+0.37** | **PASS** |
 | Qwen3-8B **instruct** | +0.75 | +0.95 | +0.20 | **+0.63** | **PASS** |
 
-Per-family CoT budgets are fixed before training: **F1 and F2 512 tokens, F3
-1024 tokens.** At 512 every F3 trace truncates and scores 0, which is a budget
-artifact rather than a capability result. The screen measures the comparator, not
-the treatment; it never substitutes for the trained E2 arm.
+The CoT budget is **1024 new tokens for every family**; 2048 adds nothing
+(F48). A budget below 1024 is not neutral: at 512 every F3 trace truncates and
+scores 0, and at 256 even 8B truncates F1. The observed effects saturate by 1024,
+so F3's small effect at both scales is a capability result, not a truncation
+artifact. The screen measures the comparator, not the treatment; it never
+substitutes for the trained E2 arm.
 
 The chat template is applied to every prompt and **reported**, because a raw
 completion baseline mostly measures format compliance (F43).

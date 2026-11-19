@@ -102,9 +102,10 @@ never pooled.
 **Backbone precondition.** `Qwen/Qwen3-1.7B` (instruct), not `-Base`. Before any
 run, `experiments/e2/evaluate.py` must clear the §6.3.1 capability screen
 (unweighted mean CoT−direct ≥ 0.10). Measured: 1.7B Base +0.067 **VOID**,
-1.7B instruct +0.35 **PASS**, 8B instruct +0.63 **PASS**. CoT budgets are fixed
-per family: **F1 512, F2 512, F3 1024** new tokens; thinking is disabled so
-`B_text` is explicit text CoT, not hidden reasoning.
+1.7B instruct +0.35 **PASS**, 8B instruct +0.63 **PASS**. The CoT budget is
+**1024 new tokens for every family** (F48: effects saturate by 1024 and 2048 adds
+nothing; at 512 all F3 traces truncate, and at 256 8B truncates F1). Thinking is
+disabled so `B_text` is explicit text CoT, not hidden reasoning.
 
 **Analysis.** Unweighted mean of exact match across F1/F2/F3. Two-level bootstrap:
 items within run, then runs. Family-level results are reported, never gating.

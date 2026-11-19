@@ -348,29 +348,38 @@ class BioRxivClient:
         doc.meta["fulltext_chars"] = len(text)
         return doc
 
-    def fetch(
-        self, since_date: str, until_date: str, max_docs: int = 1000
-    ) -> list[Document]:
-        out: list[Document] = []
+    def iter_metadata(self, since_date: str, until_date: str):
+        """Yield metadata documents page by page, without fetching full text.
+
+        Streaming matters: a weekly window is ~1,400 papers, and waiting for the
+        whole window before writing means a failure loses an hour of work. The
+        harvester consumes this generator and commits each document immediately.
+        """
         cursor = 0
-        while len(out) < max_docs:
+        while True:
             url = f"{self.BASE}/{self.server}/{since_date}/{until_date}/{cursor}"
             payload = self._get(url, as_json=True)
             rows = payload.get("collection", [])
             if not rows:
                 break
             for row in rows:
-                doc = self._metadata(row)
-                if (
-                    self.fulltext
-                    and doc.license in LICENSE_ALLOWLIST
-                    and doc.meta.get("jatsxml")
-                ):
-                    doc = self.fetch_fulltext(doc)
-                out.append(doc)
-                if len(out) >= max_docs:
-                    break
+                yield self._metadata(row)
             cursor += len(rows)
+
+    def fetch(
+        self, since_date: str, until_date: str, max_docs: int = 1000
+    ) -> list[Document]:
+        out: list[Document] = []
+        for doc in self.iter_metadata(since_date, until_date):
+            if (
+                self.fulltext
+                and doc.license in LICENSE_ALLOWLIST
+                and doc.meta.get("jatsxml")
+            ):
+                doc = self.fetch_fulltext(doc)
+            out.append(doc)
+            if len(out) >= max_docs:
+                break
         return out
 
 
