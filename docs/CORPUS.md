@@ -1,13 +1,27 @@
 # Corpus — G-1 register
 
-**Status: machinery built, real harvest pending.** The pipeline, sources, licence
-rules, document-level split, token-stream hash and corpus card are implemented in
-`experiments/corpus/` and exercised end to end by `--source fake --dry-run`
-(35 synthetic documents retained from 60, 64-hex reproducible stream). What is
-*not* done — and cannot be claimed — is the live bioRxiv/FDA harvest and the
-per-document NLL table. This is the data stage of the programme in
-[PROTOCOL.md](PROTOCOL.md); it has no GPU cost and must finish before G0 because
-E0's items are drawn from it.
+**Status: live harvest running; NLL table pending.** The pipeline, sources,
+licence rules, JATS full-text parser, resumable JSONL harvest, document-level
+split, token-stream hash and corpus card are implemented in `experiments/corpus/`
+and exercised end to end by `--source fake --dry-run` (35 synthetic documents
+retained from 60, 64-hex reproducible stream) and by a live bioRxiv window.
+
+**Measured live yield (2026-11-18).** One week of postings: 40 metadata rows →
+19 licence-allowed → **16 full-text documents** (84 % fetch success; 2 withdrawn,
+3 blocked by the host). Median **86 k characters ≈ 21 k text tokens** per
+document. Full text is the JATS XML linked per paper; abstracts alone are ~1.6 k
+characters and are not enough. Extrapolating, the 500 M-token target needs
+≈ 23 k full-text documents, which the 2025-06→2026-11 posting window can supply
+(~100 k papers, ~47 % CC-BY). The binding constraint is licence-filtered posting
+volume, not download speed. Harvest is append-only and resumable (`--resume`).
+
+Two live-only bugs were found and fixed before the main run: the API returns 30
+rows/page (the cursor had advanced by 100, skipping 70 %), and licences are
+machine tokens (`cc_by_nc_nd`) that the prose normaliser did not classify
+([FINDINGS.md](FINDINGS.md) F46). What is *not* done is the per-document
+base-model NLL table, so the memorisation screen cannot yet run. This is the data
+stage of the programme in [PROTOCOL.md](PROTOCOL.md); it has no GPU cost and must
+finish before G0 because E0's items are drawn from it.
 
 ---
 

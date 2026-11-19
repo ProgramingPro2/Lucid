@@ -106,13 +106,13 @@ def _word_tokeniser(text: str) -> list[int]:
     return out
 
 
-def _acquire(source: str, cutoff: str, max_docs: int):
+def _acquire(source: str, cutoff: str, max_docs: int, fulltext: bool = False):
     if source == "fake":
         return FakeClient(_synthetic_documents(cutoff, max_docs)), "fake"
     if source == "biorxiv":
         since = cutoff
         until = date.today().isoformat()
-        return BioRxivClient(), (since, until)
+        return BioRxivClient(fulltext=fulltext), (since, until)
     if source == "fda":
         return FdaLabelClient(), None
     raise ValueError(source)
@@ -127,21 +127,45 @@ def build(
     dry_run: bool = False,
     max_docs: int = 60,
     seed: int = 0,
+    docs_jsonl: str | Path | None = None,
+    require_fulltext: bool = False,
+    min_doc_chars: int = 2000,
 ) -> dict:
     """Run every gate and write ``card.json`` + ``manifest.json`` under ``out``."""
     out_dir = Path(out)
     cutoff = load_cutoff(cutoff)
 
-    client, spec = _acquire(source, cutoff, max_docs)
-    if source == "fake":
-        harvested = client.fetch()
-    elif source == "biorxiv":
-        harvested = client.fetch(spec[0], spec[1], max_docs=max_docs)
-    else:
-        harvested = client.fetch(max_docs=max_docs)
-
     drops: Counter[str] = Counter()
+    if docs_jsonl:
+        from .harvest import load_documents
+
+        harvested = load_documents(docs_jsonl)
+        source = f"{source}:jsonl"
+    else:
+        client, spec = _acquire(source, cutoff, max_docs, fulltext=require_fulltext)
+        if source == "fake":
+            harvested = client.fetch()
+        elif source == "biorxiv":
+            harvested = client.fetch(spec[0], spec[1], max_docs=max_docs)
+        else:
+            harvested = client.fetch(max_docs=max_docs)
+
     n_harvested = len(harvested)
+    if require_fulltext:
+        full = [d for d in harvested if d.meta.get("fulltext") == "ok"]
+        drops["not_fulltext"] += n_harvested - len(full)
+        withdrawn = [
+            d
+            for d in full
+            if d.title.upper().startswith("WITHDRAWN")
+            or "withdrawal statement" in d.text[:500].lower()
+        ]
+        drops["withdrawn"] += len(withdrawn)
+        withdrawn_ids = {d.doc_id for d in withdrawn}
+        full = [d for d in full if d.doc_id not in withdrawn_ids]
+        short = [d for d in full if len(d.text) < min_doc_chars]
+        drops["too_short"] += len(short)
+        harvested = [d for d in full if len(d.text) >= min_doc_chars]
 
     dated = filter_by_date(harvested, cutoff, grace_days=30)
     drops["date"] += n_harvested - len(dated)
@@ -240,9 +264,25 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--max-docs", type=int, default=60)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument(
+        "--docs-jsonl",
+        default=None,
+        help="build from a harvest JSONL instead of the network",
+    )
+    p.add_argument(
+        "--require-fulltext",
+        action="store_true",
+        help="drop abstract-only documents (live harvest with JATS enabled)",
+    )
+    p.add_argument(
+        "--min-doc-chars",
+        type=int,
+        default=2000,
+        help="with --require-fulltext, drop documents shorter than this",
+    )
     args = p.parse_args(argv)
 
-    if not args.dry_run and args.source == "fake":
+    if not args.dry_run and args.source == "fake" and not args.docs_jsonl:
         print("refusing: --source fake requires --dry-run", file=sys.stderr)
         return 2
     if not args.dry_run and not args.nll_json:
@@ -261,6 +301,9 @@ def main(argv: list[str] | None = None) -> int:
         dry_run=args.dry_run,
         max_docs=args.max_docs,
         seed=args.seed,
+        docs_jsonl=args.docs_jsonl,
+        require_fulltext=args.require_fulltext,
+        min_doc_chars=args.min_doc_chars,
     )
     _print_report(result)
     print(f"wrote {Path(args.out) / 'card.json'} and manifest.json")

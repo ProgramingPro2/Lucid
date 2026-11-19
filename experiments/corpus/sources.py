@@ -28,16 +28,27 @@ _LICENSE_ALIASES = {
     "cc by 4.0": "cc-by-4.0",
     "cc-by-4.0": "cc-by-4.0",
     "cc-by 4.0": "cc-by-4.0",
+    # bioRxiv/medRxiv report machine tokens such as ``cc_by_nc_nd``. Normalise
+    # underscores before lookup and list the resulting space-separated forms;
+    # missing one silently drops a whole licence class, so this is tested.
+    "cc by 4": "cc-by-4.0",
+    "cc by nc": "cc-by-nc-4.0",
+    "cc by nc 4.0": "cc-by-nc-4.0",
     # NC / ND are classified (not "unknown") so the card can count why they were
     # dropped; they are still outside LICENSE_ALLOWLIST.
     "cc by-nc 4.0": "cc-by-nc-4.0",
     "cc-by-nc-4.0": "cc-by-nc-4.0",
+    "cc by nc nd": "cc-by-nc-nd-4.0",
+    "cc by nc nd 4.0": "cc-by-nc-nd-4.0",
     "cc by-nc-nd 4.0": "cc-by-nc-nd-4.0",
     "cc-by-nc-nd-4.0": "cc-by-nc-nd-4.0",
+    "cc by nd": "cc-by-nd-4.0",
+    "cc by nd 4.0": "cc-by-nd-4.0",
     "cc by-nd 4.0": "cc-by-nd-4.0",
     "cc-by-nd-4.0": "cc-by-nd-4.0",
     "cc0": "cc0",
     "cc0 1.0": "cc0",
+    "cc0 1": "cc0",
     "cc-0": "cc0",
     "public domain": "public-domain",
     "public-domain": "public-domain",
@@ -56,6 +67,8 @@ def normalise_license(value: str | None) -> str:
         return "unknown"
     s = re.sub(r"\s+", " ", str(value).strip().lower())
     s = s.removeprefix("http://").removeprefix("https://")
+    s = s.replace("_", " ")
+    s = re.sub(r"\s+", " ", s).strip()
     if s in _LICENSE_ALIASES:
         return _LICENSE_ALIASES[s]
     # Strip a trailing version for the common "CC BY 4.0" shape only.
@@ -135,28 +148,205 @@ class FakeClient:
         return [Document(**{**d.__dict__}) for d in self.documents]
 
 
+_SECTION_STRATA: tuple[tuple[str, str], ...] = (
+    ("introduction", "introduction"),
+    ("background", "introduction"),
+    ("method", "methods"),
+    ("material", "methods"),
+    ("result", "results"),
+    ("discussion", "discussion"),
+    ("conclusion", "discussion"),
+)
+
+
+def _xml_local(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1].lower()
+
+
+def _xml_text(node, *, skip_titles: bool = True) -> str:
+    """All descendant text except tables, figures, refs and formulae.
+
+    Section and abstract titles are metadata, and concatenating them into the
+    prose produces artefacts like ``AbstractApoptosis has been…``. They are
+    skipped by default; :func:`parse_jats` reads a title explicitly with
+    ``skip_titles=False``.
+    """
+    import xml.etree.ElementTree as ET
+
+    drop = {"table-wrap", "table", "fig", "ref-list", "ref", "disp-formula"}
+    if skip_titles:
+        drop.add("title")
+    parts: list[str] = []
+
+    def walk(n) -> None:
+        if _xml_local(n.tag) in drop:
+            return
+        if n.text:
+            parts.append(n.text)
+        for child in n:
+            walk(child)
+            if child.tail:
+                parts.append(child.tail)
+
+    if isinstance(node, ET.Element):
+        walk(node)
+    return re.sub(r"\s+", " ", "".join(parts)).strip()
+
+
+def parse_jats(xml_bytes: bytes) -> tuple[str, dict[str, str]]:
+    """Extract running prose and section strata from a JATS article.
+
+    Returns ``(text, sections)``. Section titles are mapped onto the same five
+    strata the pipeline already uses; unknown or missing titles go to ``other``.
+    The abstract is kept separately, because it is a different register and the
+    stratified endpoint needs to be able to exclude it.
+    """
+    import xml.etree.ElementTree as ET
+
+    root = ET.fromstring(xml_bytes)
+    sections: dict[str, list[str]] = {}
+
+    for abstract in root.iter():
+        if _xml_local(abstract.tag) == "abstract":
+            body = _xml_text(abstract)
+            if body:
+                sections.setdefault("abstract", []).append(body)
+
+    for sec in root.iter():
+        if _xml_local(sec.tag) != "sec":
+            continue
+        title = ""
+        for child in sec:
+            if _xml_local(child.tag) == "title":
+                title = _xml_text(child, skip_titles=False).lower()
+                break
+        stratum = "other"
+        for needle, name in _SECTION_STRATA:
+            if needle in title:
+                stratum = name
+                break
+        paragraphs = [
+            _xml_text(child)
+            for child in sec
+            if _xml_local(child.tag) in {"p", "sec"}
+        ]
+        body = " ".join(p for p in paragraphs if p)
+        if body:
+            sections.setdefault(stratum, []).append(body)
+
+    joined = {k: "\n\n".join(v) for k, v in sections.items() if v}
+    text = "\n\n".join(joined.values())
+    return text, joined
+
+
 class BioRxivClient:
     """bioRxiv / medRxiv details API, queried by posting date.
 
-    The API returns metadata and, for the details endpoint, the full abstract but
-    not the full text. Full text is fetched from the ``*_content`` link when the
-    licence permits it. Both calls go through ``_http_get`` so the whole client
-    can be replaced in tests.
+    The details endpoint returns metadata and the abstract. Full text is a
+    separate JATS XML request to the per-paper ``jatsxml`` link, which is fetched
+    only when the per-item licence allows it. Every request goes through
+    ``_get``, so tests substitute a client without touching the network.
+
+    The API paginates 30 records per page. The cursor is an offset, so it must
+    advance by the number of rows actually returned — advancing by a fixed 100
+    silently skips 70 % of the corpus (found by live harvest, 2026-11-18).
     """
 
     BASE = "https://api.biorxiv.org/details"
+    UA = "LucidResearch/0.1 (academic corpus build; contact: local)"
 
-    def __init__(self, server: str = "biorxiv", timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        server: str = "biorxiv",
+        timeout: float = 45.0,
+        delay: float = 1.0,
+        retries: int = 4,
+        fulltext: bool = False,
+    ) -> None:
         if server not in {"biorxiv", "medrxiv"}:
             raise ValueError("server must be 'biorxiv' or 'medrxiv'")
         self.server = server
         self.timeout = timeout
+        self.delay = delay
+        self.retries = retries
+        self.fulltext = fulltext
+        self._last_request = 0.0
 
-    def _http_get(self, url: str) -> dict:
+    def _get(self, url: str, *, as_json: bool = False):
+        import time
+        import urllib.error
         import urllib.request
 
-        with urllib.request.urlopen(url, timeout=self.timeout) as resp:  # noqa: S310
-            return json.loads(resp.read().decode("utf-8"))
+        last: Exception | None = None
+        for attempt in range(self.retries):
+            wait = self.delay - (time.monotonic() - self._last_request)
+            if wait > 0:
+                time.sleep(wait)
+            try:
+                req = urllib.request.Request(
+                    url,
+                    headers={
+                        "User-Agent": self.UA,
+                        "Accept": "application/json" if as_json else "application/xml,text/xml,*/*",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:  # noqa: S310
+                    self._last_request = time.monotonic()
+                    payload = resp.read()
+                return json.loads(payload.decode("utf-8")) if as_json else payload
+            except urllib.error.HTTPError as exc:
+                last = exc
+                # 429/5xx are transient; 4xx otherwise is not.
+                if exc.code not in {429, 500, 502, 503, 504}:
+                    raise
+            except (urllib.error.URLError, TimeoutError) as exc:
+                last = exc
+            time.sleep(min(60.0, 5.0 * 2**attempt))
+        raise RuntimeError(f"request failed after {self.retries} attempts: {url}") from last
+
+    def _metadata(self, row: dict) -> Document:
+        text = row.get("abstract") or ""
+        return Document(
+            doc_id=f"{self.server}:{row.get('doi', '')}",
+            source=self.server,
+            title=row.get("title", ""),
+            text=text,
+            sections={"abstract": text} if text else {},
+            license=normalise_license(row.get("license")),
+            date=(row.get("date") or "1970-01-01")[:10],
+            meta={
+                "doi": row.get("doi"),
+                "version": row.get("version"),
+                "jatsxml": row.get("jatsxml"),
+                "fulltext": "abstract_only",
+            },
+        )
+
+    def fetch_fulltext(self, doc: Document) -> Document:
+        """Attach JATS full text to an allowed-licence document.
+
+        A failure is recorded on the document rather than raised: one blocked
+        paper must not abort a multi-hour harvest. The build can then drop
+        abstract-only documents explicitly (``--require-fulltext``).
+        """
+        url = doc.meta.get("jatsxml")
+        if not url:
+            doc.meta["fulltext"] = "no_jats_link"
+            return doc
+        try:
+            xml_bytes = self._get(url)
+            text, sections = parse_jats(xml_bytes)
+        except Exception as exc:  # noqa: BLE001 - recorded, not swallowed
+            doc.meta["fulltext"] = f"error:{type(exc).__name__}"
+            return doc
+        if not text.strip():
+            doc.meta["fulltext"] = "empty"
+            return doc
+        doc.text = text
+        doc.sections = sections
+        doc.meta["fulltext"] = "ok"
+        doc.meta["fulltext_chars"] = len(text)
+        return doc
 
     def fetch(
         self, since_date: str, until_date: str, max_docs: int = 1000
@@ -164,32 +354,23 @@ class BioRxivClient:
         out: list[Document] = []
         cursor = 0
         while len(out) < max_docs:
-            url = (
-                f"{self.BASE}/{self.server}/{since_date}/{until_date}/{cursor}"
-            )
-            payload = self._http_get(url)
+            url = f"{self.BASE}/{self.server}/{since_date}/{until_date}/{cursor}"
+            payload = self._get(url, as_json=True)
             rows = payload.get("collection", [])
             if not rows:
                 break
             for row in rows:
-                text = row.get("abstract") or ""
-                # The details endpoint carries only the abstract; mark that so
-                # the build cannot silently treat it as full text.
-                out.append(
-                    Document(
-                        doc_id=f"{self.server}:{row.get('doi', '')}",
-                        source=self.server,
-                        title=row.get("title", ""),
-                        text=text,
-                        sections={"abstract": text} if text else {},
-                        license=normalise_license(row.get("license")),
-                        date=(row.get("date") or "1970-01-01")[:10],
-                        meta={"doi": row.get("doi"), "version": row.get("version")},
-                    )
-                )
+                doc = self._metadata(row)
+                if (
+                    self.fulltext
+                    and doc.license in LICENSE_ALLOWLIST
+                    and doc.meta.get("jatsxml")
+                ):
+                    doc = self.fetch_fulltext(doc)
+                out.append(doc)
                 if len(out) >= max_docs:
                     break
-            cursor += 100
+            cursor += len(rows)
         return out
 
 
