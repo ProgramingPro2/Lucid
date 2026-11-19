@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="540" viewBox="0 0 980 540" font-family="Helvetica, Arial, sans-serif">
+<rect width="980" height="540" fill="#ffffff"/>
+<text x="274" y="34" text-anchor="middle" font-size="15" font-weight="600" fill="#222">Qwen3-1.7B (instruct)</text>
+<line x1="64.0" y1="56" x2="64.0" y2="436" stroke="#444" stroke-width="1"/>
+<line x1="64.0" y1="436" x2="484.0" y2="436" stroke="#444" stroke-width="1"/>
+<line x1="64.0" y1="436.0" x2="484.0" y2="436.0" stroke="#e5e5e5" stroke-width="1"/>
+<text x="56.0" y="440.0" text-anchor="end" font-size="11" fill="#555">0.00</text>
+<line x1="64.0" y1="341.0" x2="484.0" y2="341.0" stroke="#e5e5e5" stroke-width="1"/>
+<text x="56.0" y="345.0" text-anchor="end" font-size="11" fill="#555">0.25</text>
+<line x1="64.0" y1="246.0" x2="484.0" y2="246.0" stroke="#e5e5e5" stroke-width="1"/>
+<text x="56.0" y="250.0" text-anchor="end" font-size="11" fill="#555">0.50</text>
+<line x1="64.0" y1="151.0" x2="484.0" y2="151.0" stroke="#e5e5e5" stroke-width="1"/>
+<text x="56.0" y="155.0" text-anchor="end" font-size="11" fill="#555">0.75</text>
+<line x1="64.0" y1="56.0" x2="484.0" y2="56.0" stroke="#e5e5e5" stroke-width="1"/>
+<text x="56.0" y="60.0" text-anchor="end" font-size="11" fill="#555">1.00</text>
+<text x="76.0" y="456" text-anchor="middle" font-size="11" fill="#555">128</text>
+<text x="175.0" y="456" text-anchor="middle" font-size="11" fill="#555">256</text>
+<text x="274.0" y="456" text-anchor="middle" font-size="11" fill="#555">512</text>
+<text x="373.0" y="456" text-anchor="middle" font-size="11" fill="#555">1024</text>
+<text x="472.0" y="456" text-anchor="middle" font-size="11" fill="#555">2048</text>
+<text x="274" y="478" text-anchor="middle" font-size="12" fill="#333">CoT budget (new tokens)</text>
+<text x="18.0" y="246" text-anchor="middle" font-size="12" fill="#333" transform="rotate(-90 18.0 246)">exact-match accuracy</text>
+<line x1="64.0" y1="417.0" x2="484.0" y2="417.0" stroke="#1f77b4" stroke-width="1.2" stroke-dasharray="4 3" opacity="0.55"/>
+<path d="M76.0,436.0 L175.0,189.0 L274.0,170.0 L373.0,170.0 L472.0,170.0" fill="none" stroke="#1f77b4" stroke-width="2.2"/>
+<circle cx="76.0" cy="436.0" r="3.4" fill="#1f77b4"/>
+<circle cx="175.0" cy="189.0" r="3.4" fill="#1f77b4"/>
+<circle cx="274.0" cy="170.0" r="3.4" fill="#1f77b4"/>
+<circle cx="373.0" cy="170.0" r="3.4" fill="#1f77b4"/>
+<circle cx="472.0" cy="170.0" r="3.4" fill="#1f77b4"/>
+<text x="478.0" y="174.0" font-size="11" fill="#1f77b4">F1</text>
+<line x1="64.0" y1="417.0" x2="484.0" y2="417.0" stroke="#d62728" stroke-width="1.2" stroke-dasharray="4 3" opacity="0.55"/>
+<path d="M76.0,360.0 L175.0,284.0 L274.0,284.0 L373.0,265.0 L472.0,265.0" fill="none" stroke="#d62728" stroke-width="2.2"/>
+<circle cx="76.0" cy="360.0" r="3.4" fill="#d62728"/>
+<circle cx="175.0" cy="284.0" r="3.4" fill="#d62728"/>
+<circle cx="274.0" cy="284.0" r="3.4" fill="#d62728"/>
+<circle cx="373.0" cy="265.0" r="3.4" fill="#d62728"/>
+<circle cx="472.0" cy="265.0" r="3.4" fill="#d62728"/>
+<text x="478.0" y="269.0" font-size="11" fill="#d62728">F2</text>
+<line x1="64.0" y1="341.0" x2="484.0" y2="341.0" stroke="#2ca02c" stroke-width="1.2" stroke-dasharray="4 3" opacity="0.55"/>
+<path d="M76.0,436.0 L175.0,436.0 L274.0,436.0 L373.0,322.0 L472.0,322.0" fill="none" stroke="#2ca02c" stroke-width="2.2"/>
+<circle cx="76.0" cy="436.0" r="3.4" fill="#2ca02c"/>
+<circle cx="175.0" cy="436.0" r="3.4" fill="#2ca02c"/>
+<circle cx="274.0" cy="436.0" r="3.4" fill="#2ca02c"/>
+<circle cx="373.0" cy="322.0" r="3.4" fill="#2ca02c"/>
+<circle cx="472.0" cy="322.0" r="3.4" fill="#2ca02c"/>
+<text x="478.0" y="326.0" font-size="11" fill="#2ca02c">F3</text>
+<text x="746" y="34" text-anchor="middle" font-size="15" font-weight="600" fill="#222">Qwen3-8B (instruct)</text>
+<line x1="536.0" y1="56" x2="536.0" y2="436" stroke="#444" stroke-width="1"/>
+<line x1="536.0" y1="436" x2="956.0" y2="436" stroke="#444" stroke-width="1"/>
+<line x1="536.0" y1="436.0" x2="956.0" y2="436.0" stroke="#e5e5e5" stroke-width="1"/>
+<text x="528.0" y="440.0" text-anchor="end" font-size="11" fill="#555">0.00</text>
+<line x1="536.0" y1="341.0" x2="956.0" y2="341.0" stroke="#e5e5e5" stroke-width="1"/>
+<text x="528.0" y="345.0" text-anchor="end" font-size="11" fill="#555">0.25</text>
+<line x1="536.0" y1="246.0" x2="956.0" y2="246.0" stroke="#e5e5e5" stroke-width="1"/>
+<text x="528.0" y="250.0" text-anchor="end" font-size="11" fill="#555">0.50</text>
+<line x1="536.0" y1="151.0" x2="956.0" y2="151.0" stroke="#e5e5e5" stroke-width="1"/>
+<text x="528.0" y="155.0" text-anchor="end" font-size="11" fill="#555">0.75</text>
+<line x1="536.0" y1="56.0" x2="956.0" y2="56.0" stroke="#e5e5e5" stroke-width="1"/>
+<text x="528.0" y="60.0" text-anchor="end" font-size="11" fill="#555">1.00</text>
+<text x="548.0" y="456" text-anchor="middle" font-size="11" fill="#555">128</text>
+<text x="647.0" y="456" text-anchor="middle" font-size="11" fill="#555">256</text>
+<text x="746.0" y="456" text-anchor="middle" font-size="11" fill="#555">512</text>
+<text x="845.0" y="456" text-anchor="middle" font-size="11" fill="#555">1024</text>
+<text x="944.0" y="456" text-anchor="middle" font-size="11" fill="#555">2048</text>
+<text x="746" y="478" text-anchor="middle" font-size="12" fill="#333">CoT budget (new tokens)</text>
+<text x="490.0" y="246" text-anchor="middle" font-size="12" fill="#333" transform="rotate(-90 490.0 246)">exact-match accuracy</text>
+<line x1="536.0" y1="341.0" x2="956.0" y2="341.0" stroke="#1f77b4" stroke-width="1.2" stroke-dasharray="4 3" opacity="0.55"/>
+<path d="M548.0,436.0 L647.0,417.0 L746.0,56.0 L845.0,56.0 L944.0,56.0" fill="none" stroke="#1f77b4" stroke-width="2.2"/>
+<circle cx="548.0" cy="436.0" r="3.4" fill="#1f77b4"/>
+<circle cx="647.0" cy="417.0" r="3.4" fill="#1f77b4"/>
+<circle cx="746.0" cy="56.0" r="3.4" fill="#1f77b4"/>
+<circle cx="845.0" cy="56.0" r="3.4" fill="#1f77b4"/>
+<circle cx="944.0" cy="56.0" r="3.4" fill="#1f77b4"/>
+<text x="950.0" y="60.0" font-size="11" fill="#1f77b4">F1</text>
+<line x1="536.0" y1="417.0" x2="956.0" y2="417.0" stroke="#d62728" stroke-width="1.2" stroke-dasharray="4 3" opacity="0.55"/>
+<path d="M548.0,436.0 L647.0,265.0 L746.0,56.0 L845.0,56.0 L944.0,56.0" fill="none" stroke="#d62728" stroke-width="2.2"/>
+<circle cx="548.0" cy="436.0" r="3.4" fill="#d62728"/>
+<circle cx="647.0" cy="265.0" r="3.4" fill="#d62728"/>
+<circle cx="746.0" cy="56.0" r="3.4" fill="#d62728"/>
+<circle cx="845.0" cy="56.0" r="3.4" fill="#d62728"/>
+<circle cx="944.0" cy="56.0" r="3.4" fill="#d62728"/>
+<text x="950.0" y="60.0" font-size="11" fill="#d62728">F2</text>
+<line x1="536.0" y1="398.0" x2="956.0" y2="398.0" stroke="#2ca02c" stroke-width="1.2" stroke-dasharray="4 3" opacity="0.55"/>
+<path d="M548.0,436.0 L647.0,436.0 L746.0,436.0 L845.0,322.0 L944.0,322.0" fill="none" stroke="#2ca02c" stroke-width="2.2"/>
+<circle cx="548.0" cy="436.0" r="3.4" fill="#2ca02c"/>
+<circle cx="647.0" cy="436.0" r="3.4" fill="#2ca02c"/>
+<circle cx="746.0" cy="436.0" r="3.4" fill="#2ca02c"/>
+<circle cx="845.0" cy="322.0" r="3.4" fill="#2ca02c"/>
+<circle cx="944.0" cy="322.0" r="3.4" fill="#2ca02c"/>
+<text x="950.0" y="326.0" font-size="11" fill="#2ca02c">F3</text>
+<line x1="64" y1="524" x2="86" y2="524" stroke="#1f77b4" stroke-width="2.2"/>
+<circle cx="75" cy="524" r="3.2" fill="#1f77b4"/>
+<text x="94" y="528" font-size="12" fill="#333">F1 arithmetic</text>
+<line x1="254" y1="524" x2="276" y2="524" stroke="#d62728" stroke-width="2.2"/>
+<circle cx="265" cy="524" r="3.2" fill="#d62728"/>
+<text x="284" y="528" font-size="12" fill="#333">F2 relational</text>
+<line x1="444" y1="524" x2="466" y2="524" stroke="#2ca02c" stroke-width="2.2"/>
+<circle cx="455" cy="524" r="3.2" fill="#2ca02c"/>
+<text x="474" y="528" font-size="12" fill="#333">F3 state tracking</text>
+<text x="956" y="528" text-anchor="end" font-size="11" fill="#777">dashed = direct answer (no working)</text>
+</svg>
