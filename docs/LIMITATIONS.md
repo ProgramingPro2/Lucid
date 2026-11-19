@@ -1,5 +1,15 @@
 # Limitations (read this)
 
+> **Updated 2026-11.** The project has been re-scoped. The measured constraints
+> are in [WALLS.md](WALLS.md), the full claim-by-claim record in
+> [FINDINGS.md](FINDINGS.md), the current direction in [PLAN.md](PLAN.md), and the
+> pre-registered programme in [PROTOCOL.md](PROTOCOL.md).
+> The sections below about *concept-vector prediction* describe the original
+> framing, which has since been falsified: the sentence-embedding space carries
+> ≈4% sequential variance, so next-sentence prediction was never learnable
+> (W1). The sections on the joint JEPA codec, reward hacking, and decoder
+> fidelity remain accurate and still matter.
+
 This project is an honest proof-of-concept. It is easy to overstate what it
 does, so this document is deliberately blunt.
 
@@ -52,6 +62,29 @@ does, so this document is deliberately blunt.
   substantial corpus (on the 3090) before judging quality.
 - **alpha is a knife edge.** Too much prediction weight smears or collapses the
   space; too little and it is just an autoencoder with a predictor attached.
+
+## Measured limitations (2026-11)
+
+These are not cautions; they are numbers.
+
+- **No order in the concept space.** Consecutive-delta autocorrelation
+  −0.4865 against an exchangeability bound of −0.5, i.e. ρ ≈ 0.04. The space is
+  a bag of sentences around a topic centroid. Any "predict the next concept"
+  design is dead on arrival (W1).
+- **The corpus never contained documents.** 113,216 shuffled single paragraphs;
+  4.1% of documents yielded any ctx-32 training window (1,677 total), 81%
+  Wikipedia (W4).
+- **The steering channel was never load-bearing.** A pretrained LM scores
+  0.663–0.667 `fed_vs_concept` *without* steering; identity and zero arms
+  matched or beat steered arms in every from-scratch writer table (W2).
+- **Rendering is the bottleneck, not the concept machinery.** Concept-space
+  coherence is at human level (0.355 vs 0.336); text rendering reaches
+  0.185–0.221 against a human ceiling of 0.650 (W3).
+- **Several gates could not fail.** The "+54 nats" conditional gain was 50.4
+  nats mixture capacity and 0.4 nats conditioning; a fluency gate passed with
+  infinite NLL; `reconstruction_cosine` is 1.0 by construction (W5).
+- **Novelty was never achieved or needed.** Re-encoded text novelty 0.750 vs
+  human median 0.745. String-level novelty is free.
 
 ## Honest scaling note
 Each ingredient (a strong predictor, a large clean corpus, a reliable judge,

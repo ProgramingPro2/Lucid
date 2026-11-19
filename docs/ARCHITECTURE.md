@@ -1,5 +1,25 @@
 # Architecture
 
+> **Updated 2026-11 with a status banner.** This file is a map of the code as
+> built. Most of it describes components that have since been measured and
+> retired — see [WALLS.md](WALLS.md) and [FINDINGS.md](FINDINGS.md). Read the
+> banner before trusting any section below.
+>
+> **Still load-bearing:** `codec/` (the frozen encoder, as a *paragraph topic*
+> codec), `data/` (segmenter, doc-disjoint splits, cache), `eval/` (the
+> anti-mirage protocol), `reward/`, and `experiments/pivot/`'s Phase-A adapter
+> plumbing (parked).
+>
+> **Historical / retired:** `predictor/` (all heads), `generate/rollout.py`'s
+> per-sentence loop, `writer/` (all phases), `trajectory/`, `experts/`,
+> `loop/self_improve.py`, and the joint-JEPA training loop (the *trained*
+> encoder is kept; the training objective is the thing that was falsified).
+>
+> The decisive localisation: concept-space coherence is at human level
+> (0.355 vs 0.336) while text rendering reaches 0.185–0.221 against a human
+> ceiling of 0.650. The signal dies in the renderer, not in the concepts.
+
+
 ## Overview
 
 The system predicts ideas (sentence-level concept vectors) instead of tokens.

@@ -11,6 +11,24 @@ on Meta's Large Concept Model (LCM) and SONAR. It runs on a single GPU (or CPU
 for tests). It is a research prototype, **not** an attempt at human-level AI.
 See [docs/LIMITATIONS.md](docs/LIMITATIONS.md) for an honest account of scope.
 
+> ## ⚠ Status: the original framing is falsified (2026-11)
+>
+> The premise below — predict the next sentence-concept vector, then decode —
+> was measured and does not work. The concept space carries ≈4% sequential
+> variance (delta autocorrelation −0.4865 against a −0.5 bound), so there is
+> nothing for a predictor to learn; and the steering channel never beat an
+> identity/zero control.
+>
+> - [docs/WALLS.md](docs/WALLS.md) — the five measured constraints.
+> - [docs/FINDINGS.md](docs/FINDINGS.md) — every claim with its number.
+> - [docs/PLAN.md](docs/PLAN.md) — what survives and what comes next.
+> - [docs/IDEAS.md](docs/IDEAS.md) — the live bets, mapped to the walls.
+> - [docs/PROTOCOL.md](docs/PROTOCOL.md) — the pre-registered confirmatory programme.
+> - [docs/EXPLAINER.md](docs/EXPLAINER.md) — the vocabulary, with diagrams.
+>
+> Read those before the rest of this README. The text below describes the
+> original prototype and is kept for context.
+
 ## How it works
 
 ```
@@ -161,6 +179,10 @@ Tests use a deterministic hashing codec and need no downloads or network.
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) - design and data flow
 - [docs/PLAN.md](docs/PLAN.md) - scope and key decisions
+- [docs/PROTOCOL.md](docs/PROTOCOL.md) - the pre-registered programme and its gates
+- [docs/CORPUS.md](docs/CORPUS.md) - the data stage: sources, licences, splits
+- [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md) - run manifests and run order
+- [docs/EXPLAINER.md](docs/EXPLAINER.md) - glossary and diagrams
 - [docs/LIMITATIONS.md](docs/LIMITATIONS.md) - what this does and does not do
 
 ## License
