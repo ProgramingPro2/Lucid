@@ -38,8 +38,8 @@ def test_writer_generate():
     w = FluWriter(vocab, dim=256, n_layers=4, n_heads=4, max_seq_len=64, concept_dim=128)
     concept = torch.randn(2, 128)
     out = w.generate(concept, max_tokens=20, bos_id=1, temperature=0.8, top_k=10)
-    assert out.shape == (2, 21)  # 1 bos + 20 tokens
-    assert (out == 1).all() or True  # bos present
+    # generate() returns new tokens only; the BOS prompt is not included.
+    assert out.shape == (2, 20)
 
 
 def test_writer_film_uses_concept_strongly():

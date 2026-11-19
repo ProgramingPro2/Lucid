@@ -95,11 +95,24 @@ shared-trunk arm.
 | `e2/F1/C/s*` | 3 × 3 | run | λ = 0 fault detection |
 | `e2/F1/dose-*/s*` | 36 | run | λ ∈ {low, mid, high}; VQ ∈ {1, 8, 16} bits |
 
-**Total E2:** 189 runs ≈ **290 GPU-hours** at 1.7B.
+**Total E2:** 189 runs ≈ **290 GPU-hours** at 1.7B instruct. An 8B replication of
+the full manifest is ≈ 4.7× (≈ 1,360 h); if run, it is reported separately and
+never pooled.
+
+**Backbone precondition.** `Qwen/Qwen3-1.7B` (instruct), not `-Base`. Before any
+run, `experiments/e2/evaluate.py` must clear the §6.3.1 capability screen
+(unweighted mean CoT−direct ≥ 0.10). Measured: 1.7B Base +0.067 **VOID**,
+1.7B instruct +0.35 **PASS**, 8B instruct +0.63 **PASS**. CoT budgets are fixed
+per family: **F1 512, F2 512, F3 1024** new tokens; thinking is disabled so
+`B_text` is explicit text CoT, not hidden reasoning.
 
 **Analysis.** Unweighted mean of exact match across F1/F2/F3. Two-level bootstrap:
 items within run, then runs. Family-level results are reported, never gating.
 Responder proportion uses an exact binomial CI.
+
+**Checkpoint.** `e2/capability/<model>/<family>.json` (screen; n = 20, not pooled)
+and `e2/<F>/<arm>/s*` (trained runs). The screen's rows are reported alongside
+the trained arm so the comparator's ceiling is visible.
 
 ---
 

@@ -280,7 +280,34 @@ reported as a family-specific finding.
 
 ### 6.3 Arms
 
-Backbone 1.7B (matches E1; 0.6B dropped as too small for a capacity-mediated null).
+**Backbone: Qwen3-1.7B instruct (primary; matches E1's scale), Qwen3-8B instruct
+(scale replication).** The 1.7B **Base** checkpoint is excluded: given the CoT
+prompt as raw text it emits EOS, and with a chat template it degenerates into a
+`.waitKey` repetition loop instead of working the problem (F44). On the same
+2-digit task Base scores 0.90 direct but 0.10 with explicit CoT — an
+instruction-following failure, not a difficulty result. The capability screen in
+§6.3.1 is a **precondition**: an E2 arm is not trained until its backbone clears
+it. 0.6B is dropped as too small for a capacity-mediated null.
+
+#### 6.3.1 Capability screen (precondition, not a result)
+
+Direct answer versus **explicit text CoT**, same weights, thinking disabled,
+n = 20 per family, exact match. A backbone is usable iff the unweighted mean
+CoT−direct gain is **≥ 0.10**.
+
+| Backbone | F1 | F2 | F3 | Mean | Gate |
+|---|---|---|---|---|---|
+| Qwen3-1.7B **Base** | 0.00 | +0.15 | +0.05 | +0.067 | **VOID** — CoT degenerates |
+| Qwen3-1.7B **instruct** | **+0.65** | **+0.35** | +0.05 | **+0.35** | **PASS** |
+| Qwen3-8B **instruct** | +0.75 | +0.95 | +0.20 | **+0.63** | **PASS** |
+
+Per-family CoT budgets are fixed before training: **F1 and F2 512 tokens, F3
+1024 tokens.** At 512 every F3 trace truncates and scores 0, which is a budget
+artifact rather than a capability result. The screen measures the comparator, not
+the treatment; it never substitutes for the trained E2 arm.
+
+The chat template is applied to every prompt and **reported**, because a raw
+completion baseline mostly measures format compliance (F43).
 
 | Arm | Role | Construction | *n* / family |
 |---|---|---|---|
@@ -303,8 +330,14 @@ Backbone 1.7B (matches E1; 0.6B dropped as too small for a capacity-mediated nul
 - **MPID.** +0.05 absolute accuracy.
 
 **PASS** iff A − B_text LB > 0 at matched FLOPs **and** responders ≥ 0.60 **and**
-necessity ≥ 50 %. **VOID** if B_text − E < 0.10 (the assay cannot see a
+necessity ≥ 50 %. **VOID** if the backbone fails the §6.3.1 capability screen
+(mean CoT−direct < 0.10), if B_text − E < 0.10 (the assay cannot see a
 46 × MPID effect), if FLOP mismatch > 5 %, or if C is *not* ignored.
+
+The capability screen is run and reported **before** the trained arm. It is a
+fault check on the comparator, not a test of the hypothesis; its n is not pooled
+with the E2 n. The observed screen values (1.7B instruct +0.35, 8B +0.63) are
+recorded in [FINDINGS.md](FINDINGS.md) F45.
 
 **No family is added after the first result.** A "one more family" decision after
 seeing F1 is the exact failure mode unlimited compute invites.
