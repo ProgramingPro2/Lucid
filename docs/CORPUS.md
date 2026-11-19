@@ -18,10 +18,19 @@ volume, not download speed. Harvest is append-only and resumable (`--resume`).
 Two live-only bugs were found and fixed before the main run: the API returns 30
 rows/page (the cursor had advanced by 100, skipping 70 %), and licences are
 machine tokens (`cc_by_nc_nd`) that the prose normaliser did not classify
-([FINDINGS.md](FINDINGS.md) F46). What is *not* done is the per-document
-base-model NLL table, so the memorisation screen cannot yet run. This is the data
-stage of the programme in [PROTOCOL.md](PROTOCOL.md); it has no GPU cost and must
-finish before G0 because E0's items are drawn from it.
+([FINDINGS.md](FINDINGS.md) F46).
+
+**NLL and a pilot build.** `experiments/corpus/nll.py` scores four evenly spaced
+2,048-token windows per document with the base model and writes a resumable table
+(measured at ~460 documents/min on this card). A 40-document live pilot then went
+through every gate: **13 documents retained** (~167 k tokens across the five
+strata). The surviving drops were 26 pre-cutoff dates, 24 abstract-only or
+withdrawn documents, and 1 low-NLL document; the counts overlap because
+`not_fulltext` contains the withdrawn ones. This proves the whole chain
+(harvest → NLL → gates → split → hash → card) on real data. What is *not* done is
+the full 500 M-token harvest; it is running and resumable. This is the data stage
+of the programme in [PROTOCOL.md](PROTOCOL.md); it has no GPU cost and must finish
+before G0 because E0's items are drawn from it.
 
 ---
 

@@ -182,7 +182,15 @@ def build(
     drops["near_duplicate"] += len(dense) - len(deduped)
 
     if nll_json:
-        table = json.loads(Path(nll_json).read_text())
+        payload = json.loads(Path(nll_json).read_text())
+        # Accept both the scorer's envelope and a bare {doc_id: nll} table.
+        table = payload.get("nll", payload) if isinstance(payload, dict) else payload
+        missing = [d.doc_id for d in harvested if d.doc_id not in table]
+        if missing:
+            raise KeyError(
+                f"{len(missing)} harvested documents have no NLL score, e.g. "
+                f"{missing[0]}; rerun experiments.corpus.nll over this JSONL"
+            )
         nll_fn = lambda d: float(table[d.doc_id])  # noqa: E731
     else:
         nll_fn = _stub_nll
@@ -206,7 +214,7 @@ def build(
             "base_model": "pending (operator must record the model card)",
             "documents_harvested": n_harvested,
             "token_stream_sha256": stream_hash,
-            "nll_decile": "stub" if not nll_json else nll_json,
+            "nll_decile": "stub" if not nll_json else str(nll_json),
             "sealed_test_key_holder": "pending",
         },
     )
@@ -234,13 +242,14 @@ def build(
         "manifest": manifest,
         "drops": dict(sorted(drops.items())),
         "tokens_per_stratum": dict(sorted(tokens_per_stratum.items())),
+        "dry_run": dry_run,
     }
 
 
 def _print_report(result: dict) -> None:
     card = result["card"]
     print("=" * 68)
-    print("CORPUS BUILD REPORT" + (" (DRY RUN — SYNTHETIC INPUT)" if card else ""))
+    print("CORPUS BUILD REPORT" + (" (DRY RUN)" if result.get("dry_run") else ""))
     print("=" * 68)
     print(f"documents harvested : {card['documents_harvested']}")
     print("drops by reason:")
