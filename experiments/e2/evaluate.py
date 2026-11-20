@@ -198,8 +198,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--max-new-tokens-cot",
         type=int,
-        default=512,
-        help="F1/F2 need 512; F3 needs 1024 or every trace truncates",
+        default=1024,
+        help="1024 is the protocol budget; below it F3 truncates (F48)",
     )
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument(

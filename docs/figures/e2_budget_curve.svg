@@ -27,7 +27,6 @@
 <circle cx="274.0" cy="170.0" r="3.4" fill="#1f77b4"/>
 <circle cx="373.0" cy="170.0" r="3.4" fill="#1f77b4"/>
 <circle cx="472.0" cy="170.0" r="3.4" fill="#1f77b4"/>
-<text x="478.0" y="174.0" font-size="11" fill="#1f77b4">F1</text>
 <line x1="64.0" y1="417.0" x2="484.0" y2="417.0" stroke="#d62728" stroke-width="1.2" stroke-dasharray="4 3" opacity="0.55"/>
 <path d="M76.0,360.0 L175.0,284.0 L274.0,284.0 L373.0,265.0 L472.0,265.0" fill="none" stroke="#d62728" stroke-width="2.2"/>
 <circle cx="76.0" cy="360.0" r="3.4" fill="#d62728"/>
@@ -35,7 +34,6 @@
 <circle cx="274.0" cy="284.0" r="3.4" fill="#d62728"/>
 <circle cx="373.0" cy="265.0" r="3.4" fill="#d62728"/>
 <circle cx="472.0" cy="265.0" r="3.4" fill="#d62728"/>
-<text x="478.0" y="269.0" font-size="11" fill="#d62728">F2</text>
 <line x1="64.0" y1="341.0" x2="484.0" y2="341.0" stroke="#2ca02c" stroke-width="1.2" stroke-dasharray="4 3" opacity="0.55"/>
 <path d="M76.0,436.0 L175.0,436.0 L274.0,436.0 L373.0,322.0 L472.0,322.0" fill="none" stroke="#2ca02c" stroke-width="2.2"/>
 <circle cx="76.0" cy="436.0" r="3.4" fill="#2ca02c"/>
@@ -43,7 +41,6 @@
 <circle cx="274.0" cy="436.0" r="3.4" fill="#2ca02c"/>
 <circle cx="373.0" cy="322.0" r="3.4" fill="#2ca02c"/>
 <circle cx="472.0" cy="322.0" r="3.4" fill="#2ca02c"/>
-<text x="478.0" y="326.0" font-size="11" fill="#2ca02c">F3</text>
 <text x="746" y="34" text-anchor="middle" font-size="15" font-weight="600" fill="#222">Qwen3-8B (instruct)</text>
 <line x1="536.0" y1="56" x2="536.0" y2="436" stroke="#444" stroke-width="1"/>
 <line x1="536.0" y1="436" x2="956.0" y2="436" stroke="#444" stroke-width="1"/>
@@ -71,7 +68,6 @@
 <circle cx="746.0" cy="56.0" r="3.4" fill="#1f77b4"/>
 <circle cx="845.0" cy="56.0" r="3.4" fill="#1f77b4"/>
 <circle cx="944.0" cy="56.0" r="3.4" fill="#1f77b4"/>
-<text x="950.0" y="60.0" font-size="11" fill="#1f77b4">F1</text>
 <line x1="536.0" y1="417.0" x2="956.0" y2="417.0" stroke="#d62728" stroke-width="1.2" stroke-dasharray="4 3" opacity="0.55"/>
 <path d="M548.0,436.0 L647.0,265.0 L746.0,56.0 L845.0,56.0 L944.0,56.0" fill="none" stroke="#d62728" stroke-width="2.2"/>
 <circle cx="548.0" cy="436.0" r="3.4" fill="#d62728"/>
@@ -79,7 +75,6 @@
 <circle cx="746.0" cy="56.0" r="3.4" fill="#d62728"/>
 <circle cx="845.0" cy="56.0" r="3.4" fill="#d62728"/>
 <circle cx="944.0" cy="56.0" r="3.4" fill="#d62728"/>
-<text x="950.0" y="60.0" font-size="11" fill="#d62728">F2</text>
 <line x1="536.0" y1="398.0" x2="956.0" y2="398.0" stroke="#2ca02c" stroke-width="1.2" stroke-dasharray="4 3" opacity="0.55"/>
 <path d="M548.0,436.0 L647.0,436.0 L746.0,436.0 L845.0,322.0 L944.0,322.0" fill="none" stroke="#2ca02c" stroke-width="2.2"/>
 <circle cx="548.0" cy="436.0" r="3.4" fill="#2ca02c"/>
@@ -87,7 +82,6 @@
 <circle cx="746.0" cy="436.0" r="3.4" fill="#2ca02c"/>
 <circle cx="845.0" cy="322.0" r="3.4" fill="#2ca02c"/>
 <circle cx="944.0" cy="322.0" r="3.4" fill="#2ca02c"/>
-<text x="950.0" y="326.0" font-size="11" fill="#2ca02c">F3</text>
 <line x1="64" y1="524" x2="86" y2="524" stroke="#1f77b4" stroke-width="2.2"/>
 <circle cx="75" cy="524" r="3.2" fill="#1f77b4"/>
 <text x="94" y="528" font-size="12" fill="#333">F1 arithmetic</text>

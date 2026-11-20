@@ -104,13 +104,6 @@ def _panel(data: dict, x0: float, title: str, budgets: list[int]) -> list[str]:
             parts.append(
                 f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3.4" fill="{colour}"/>'
             )
-        # Label at the right end.
-        if points:
-            x, y, value = points[-1]
-            parts.append(
-                f'<text x="{x + 6:.1f}" y="{y + 4:.1f}" font-size="11" '
-                f'fill="{colour}">{LABELS[family].split()[0]}</text>'
-            )
     return parts
 
 

@@ -38,6 +38,40 @@ def test_shapes_and_mask_accepted():
     assert block(x, attention_mask=mask).shape == (3, 7, 48)
 
 
+def test_padding_does_not_change_valid_positions():
+    torch.manual_seed(0)
+    block = JEPABlock(32, n_heads=4, zero_init_output=False).double()
+    x = torch.randn(1, 4, 32, dtype=torch.float64)
+    pad_a = torch.randn(1, 3, 32, dtype=torch.float64)
+    pad_b = torch.randn(1, 3, 32, dtype=torch.float64)
+    mask = torch.tensor([[1, 1, 1, 1, 0, 0, 0]])
+    out_a = block(torch.cat([x, pad_a], dim=1), attention_mask=mask)
+    out_b = block(torch.cat([x, pad_b], dim=1), attention_mask=mask)
+    assert torch.allclose(out_a[:, :4], out_b[:, :4], atol=1e-10)
+
+
+def test_vicreg_mask_ignores_padding():
+    torch.manual_seed(0)
+    real = torch.randn(1, 5, 16, dtype=torch.float64)
+    pad_a = torch.randn(1, 3, 16, dtype=torch.float64)
+    pad_b = torch.randn(1, 3, 16, dtype=torch.float64) * 100
+    mask = torch.tensor([[1, 1, 1, 1, 1, 0, 0, 0]])
+    va, ca = vicreg_terms(torch.cat([real, pad_a], 1), mask=mask)
+    vb, cb = vicreg_terms(torch.cat([real, pad_b], 1), mask=mask)
+    assert torch.allclose(va, vb)
+    assert torch.allclose(ca, cb)
+
+
+def test_whiten_mask_zeroes_padding_and_uses_real_statistics():
+    real = torch.randn(1, 4, 8)
+    x = torch.cat([real, torch.full((1, 2, 8), 99.0)], dim=1)
+    mask = torch.tensor([[1, 1, 1, 1, 0, 0]])
+    out = whiten(x, mask=mask)
+    assert torch.allclose(out[:, 4:], torch.zeros(1, 2, 8), atol=1e-6)
+    unmasked = whiten(real)
+    assert torch.allclose(out[:, :4], unmasked, atol=1e-5)
+
+
 def test_ema_moves_toward_student_and_never_requires_grad():
     student = torch.nn.Linear(4, 4)
     teacher = EMATeacher(student)

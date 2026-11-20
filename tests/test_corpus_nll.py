@@ -26,6 +26,14 @@ def test_long_document_windows_cover_start_and_end():
     assert all(windows[i][-1] < windows[i + 1][0] + 1 for i in range(3))
 
 
+def test_windows_do_not_repeat_start_positions():
+    ids = list(range(12))
+    windows = token_windows(ids, length=10, n_windows=8)
+    assert len(windows) == 3
+    assert len({w[0] for w in windows}) == 3
+    assert all(len(w) == 10 for w in windows)
+
+
 def test_windows_are_deterministic():
     ids = list(range(500))
     a = token_windows(ids, length=64, n_windows=3)

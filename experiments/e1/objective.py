@@ -58,14 +58,26 @@ def jepa_loss(
     return loss, {"n_positions": n_pos, "mean": float(loss.detach()), "delta": delta}
 
 
-def vicreg_terms(x: torch.Tensor, eps: float = 1e-4) -> tuple[torch.Tensor, torch.Tensor]:
+def vicreg_terms(
+    x: torch.Tensor,
+    eps: float = 1e-4,
+    mask: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Variance hinge and covariance penalty (VICReg, Bardes et al. 2022).
 
     ``var`` penalises any feature dimension whose std falls below 1.
     ``cov`` penalises correlation between feature dimensions. Together they make
     collapse expensive, which is the property the F10 ablation lacked.
+
+    ``mask`` (B, T) selects real positions. Padding is a constant vector, so
+    including it inflates the variance term and makes the penalty depend on
+    sequence length rather than on representation quality.
     """
-    if x.ndim != 2:
+    if mask is not None:
+        if mask.shape != x.shape[:2]:
+            raise ValueError("mask must match the leading dimensions of x")
+        flat = x[mask.bool()]
+    elif x.ndim != 2:
         flat = x.reshape(-1, x.size(-1))
     else:
         flat = x
@@ -98,8 +110,7 @@ def combined_loss(
     pred, diag = jepa_loss(
         student_states, teacher_states, delta, mask, use_cosine=use_cosine
     )
-    flat_s = student_states.reshape(-1, student_states.size(-1))
-    var, cov = vicreg_terms(flat_s)
+    var, cov = vicreg_terms(student_states, mask=mask)
     total = pred + lambda_var * var + lambda_cov * cov
     diag.update(
         {

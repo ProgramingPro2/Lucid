@@ -260,7 +260,7 @@ class BioRxivClient:
         server: str = "biorxiv",
         timeout: float = 45.0,
         delay: float = 1.0,
-        retries: int = 4,
+        retries: int = 6,
         fulltext: bool = False,
     ) -> None:
         if server not in {"biorxiv", "medrxiv"}:
@@ -271,6 +271,9 @@ class BioRxivClient:
         self.retries = retries
         self.fulltext = fulltext
         self._last_request = 0.0
+        # A 429 is a host-level request to stop, not a per-URL hiccup. Once one
+        # arrives, every subsequent request waits out this cooldown.
+        self._cooldown_until = 0.0
 
     def _get(self, url: str, *, as_json: bool = False):
         import time
@@ -279,7 +282,11 @@ class BioRxivClient:
 
         last: Exception | None = None
         for attempt in range(self.retries):
-            wait = self.delay - (time.monotonic() - self._last_request)
+            now = time.monotonic()
+            wait = max(
+                self.delay - (now - self._last_request),
+                self._cooldown_until - now,
+            )
             if wait > 0:
                 time.sleep(wait)
             try:
@@ -296,12 +303,20 @@ class BioRxivClient:
                 return json.loads(payload.decode("utf-8")) if as_json else payload
             except urllib.error.HTTPError as exc:
                 last = exc
-                # 429/5xx are transient; 4xx otherwise is not.
-                if exc.code not in {429, 500, 502, 503, 504}:
+                if exc.code == 429:
+                    header = exc.headers.get("Retry-After") if exc.headers else None
+                    try:
+                        retry_after = float(header) if header else 0.0
+                    except ValueError:
+                        retry_after = 0.0
+                    # The host said stop. Back off for at least a minute even if
+                    # it gave no header; retrying immediately extends the ban.
+                    self._cooldown_until = time.monotonic() + max(retry_after, 60.0)
+                elif exc.code not in {500, 502, 503, 504}:
                     raise
             except (urllib.error.URLError, TimeoutError) as exc:
                 last = exc
-            time.sleep(min(60.0, 5.0 * 2**attempt))
+            time.sleep(min(300.0, 10.0 * 2**attempt))
         raise RuntimeError(f"request failed after {self.retries} attempts: {url}") from last
 
     def _metadata(self, row: dict) -> Document:

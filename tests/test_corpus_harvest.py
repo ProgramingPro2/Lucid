@@ -84,6 +84,39 @@ def test_fetch_advances_cursor_by_rows_returned():
     assert client._last_request == 0.0  # _get override bypasses the clock
 
 
+def test_get_retries_a_429_and_honours_retry_after(monkeypatch):
+    import time
+    import urllib.error
+
+    calls: list[str] = []
+
+    class Response:
+        def read(self):
+            return b'{"collection": []}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(req, timeout):
+        calls.append(req.full_url)
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(
+                req.full_url, 429, "Too Many Requests", {"Retry-After": "0"}, None
+            )
+        return Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+
+    client = BioRxivClient(delay=0.0, retries=2)
+    assert client._get("https://example.test/x", as_json=True) == {"collection": []}
+    assert len(calls) == 2
+    assert client._cooldown_until > 0
+
+
 def test_fulltext_fetched_only_for_allowed_licence():
     class Client(BioRxivClient):
         def _get(self, url, *, as_json=False):
@@ -166,6 +199,51 @@ def test_harvest_resumes_without_duplicate_doc_ids(tmp_path, monkeypatch):
     assert len(lines) == 3
     assert len({r["doc_id"] for r in lines}) == 3
     assert set(lines[0]) >= {"doc_id", "source", "text", "sections", "license", "date"}
+
+
+def test_harvest_retries_a_rate_limited_window(tmp_path, monkeypatch):
+    docs = [
+        Document(
+            doc_id=f"biorxiv:retry{i}",
+            source="biorxiv",
+            title="t",
+            text="running prose",
+            sections={"methods": "running prose"},
+            license="cc-by",
+            date=date.today().isoformat(),
+            meta={"fulltext": "ok"},
+        )
+        for i in range(2)
+    ]
+
+    class Flaky(BioRxivClient):
+        calls = 0
+
+        def __init__(self, **kwargs):
+            kwargs["delay"] = 0.0
+            super().__init__(**kwargs)
+
+        def iter_metadata(self, since, until):
+            type(self).calls += 1
+            if type(self).calls == 1:
+                raise RuntimeError("simulated 429")
+            yield from docs
+
+    monkeypatch.setattr(harvest_mod, "BioRxivClient", Flaky)
+    out = tmp_path / "harvest.jsonl"
+    counts = harvest_mod.harvest(
+        server="biorxiv",
+        since=(date.today() - timedelta(days=60)).isoformat(),
+        until=date.today().isoformat(),
+        out=out,
+        max_docs=10,
+        delay=0.0,
+        cooldown=0.0,
+        window_retries=2,
+    )
+    assert Flaky.calls >= 2
+    assert counts["written"] == 2
+    assert len(out.read_text().splitlines()) == 2
 
 
 def test_build_from_jsonl_requires_fulltext(tmp_path):

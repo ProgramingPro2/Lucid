@@ -69,6 +69,8 @@ def harvest(
     delay: float = 1.0,
     fulltext: bool = True,
     resume: bool = True,
+    window_retries: int = 3,
+    cooldown: float = 120.0,
 ) -> dict:
     out.parent.mkdir(parents=True, exist_ok=True)
     done = _load_done(out) if resume else set()
@@ -91,45 +93,60 @@ def harvest(
             remaining = max_docs - counts["written"]
             if remaining <= 0:
                 break
-            print(f"[harvest] {server} {lo}..{hi}", flush=True)
-            try:
-                for doc in client.iter_metadata(lo, hi):
-                    if counts["written"] >= max_docs:
-                        print("[harvest] reached --max-docs", flush=True)
-                        return counts
-                    counts["metadata"] += 1
-                    if doc.doc_id in done:
-                        counts["skipped_existing"] += 1
-                        continue
-                    allowed = doc.license in LICENSE_ALLOWLIST
-                    counts["licence_allowed"] += int(allowed)
-                    if fulltext and allowed and doc.meta.get("jatsxml"):
-                        doc = client.fetch_fulltext(doc)
-                    status = doc.meta.get("fulltext", "abstract_only")
-                    if status == "ok":
-                        counts["fulltext_ok"] += 1
-                    elif status == "abstract_only":
-                        counts["abstract_only"] += 1
-                    else:
-                        counts["fulltext_error"] += 1
-                    fh.write(json.dumps(asdict(doc)) + "\n")
-                    fh.flush()
-                    done.add(doc.doc_id)
-                    counts["written"] += 1
-                    if counts["written"] % 25 == 0:
-                        rate = counts["written"] / max(1e-9, time.time() - started)
-                        print(
-                            f"[harvest] written={counts['written']} "
-                            f"fulltext_ok={counts['fulltext_ok']} "
-                            f"{rate * 60:.1f} docs/min",
-                            flush=True,
-                        )
-            except Exception as exc:  # noqa: BLE001 - keep earlier documents
+            for attempt in range(1, window_retries + 1):
                 print(
-                    f"[harvest] window stopped: {type(exc).__name__}: {exc}",
+                    f"[harvest] {server} {lo}..{hi} (attempt {attempt}/{window_retries})",
                     flush=True,
                 )
-                continue
+                try:
+                    for doc in client.iter_metadata(lo, hi):
+                        if counts["written"] >= max_docs:
+                            print("[harvest] reached --max-docs", flush=True)
+                            return counts
+                        counts["metadata"] += 1
+                        if doc.doc_id in done:
+                            counts["skipped_existing"] += 1
+                            continue
+                        allowed = doc.license in LICENSE_ALLOWLIST
+                        counts["licence_allowed"] += int(allowed)
+                        if fulltext and allowed and doc.meta.get("jatsxml"):
+                            doc = client.fetch_fulltext(doc)
+                        status = doc.meta.get("fulltext", "abstract_only")
+                        if status == "ok":
+                            counts["fulltext_ok"] += 1
+                        elif status == "abstract_only":
+                            counts["abstract_only"] += 1
+                        else:
+                            counts["fulltext_error"] += 1
+                        fh.write(json.dumps(asdict(doc)) + "\n")
+                        fh.flush()
+                        done.add(doc.doc_id)
+                        counts["written"] += 1
+                        if counts["written"] % 25 == 0:
+                            rate = counts["written"] / max(
+                                1e-9, time.time() - started
+                            )
+                            print(
+                                f"[harvest] written={counts['written']} "
+                                f"fulltext_ok={counts['fulltext_ok']} "
+                                f"{rate * 60:.1f} docs/min",
+                                flush=True,
+                            )
+                    break
+                except Exception as exc:  # noqa: BLE001 - keep earlier documents
+                    print(
+                        f"[harvest] window stopped: {type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
+                    if attempt < window_retries:
+                        print(
+                            f"[harvest] retrying window in {cooldown:.0f}s "
+                            "(documents already written are kept)",
+                            flush=True,
+                        )
+                        time.sleep(cooldown)
+                    else:
+                        print("[harvest] giving up on this window", flush=True)
     return counts
 
 
@@ -155,6 +172,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--delay", type=float, default=1.0, help="seconds between requests")
     p.add_argument("--abstract-only", action="store_true")
     p.add_argument("--no-resume", action="store_true")
+    p.add_argument(
+        "--window-retries",
+        type=int,
+        default=3,
+        help="retry a rate-limited window before giving up on it",
+    )
+    p.add_argument(
+        "--cooldown",
+        type=float,
+        default=120.0,
+        help="seconds to wait between window retries",
+    )
     args = p.parse_args(argv)
 
     counts = harvest(
@@ -167,6 +196,8 @@ def main(argv: list[str] | None = None) -> int:
         delay=args.delay,
         fulltext=not args.abstract_only,
         resume=not args.no_resume,
+        window_retries=args.window_retries,
+        cooldown=args.cooldown,
     )
     print(json.dumps(counts, indent=2))
     return 0

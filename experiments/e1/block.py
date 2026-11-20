@@ -60,7 +60,17 @@ class JEPABlock(nn.Module):
             raise ValueError(f"expected (B,T,{self.d_model}), got {tuple(x.shape)}")
 
         h = self.ln1(x)
-        attn_out, _ = self.attn(h, h, h, need_weights=False)
+        # ``nn.MultiheadAttention`` uses True to mean "ignore this key". Without
+        # this, a padded batch lets every real token attend to padding, and the
+        # block's contribution depends on batch composition.
+        key_padding = None
+        if attention_mask is not None:
+            if attention_mask.shape != x.shape[:2]:
+                raise ValueError("attention_mask must be (B, T)")
+            key_padding = attention_mask == 0
+        attn_out, _ = self.attn(
+            h, h, h, key_padding_mask=key_padding, need_weights=False
+        )
         h = x + attn_out
         h = h + self.mlp(self.ln2(h))
         return self.out(h)
@@ -92,13 +102,31 @@ class EMATeacher(nn.Module):
             tb.copy_(sb)
 
 
-def whiten(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+def whiten(
+    x: torch.Tensor,
+    eps: float = 1e-6,
+    mask: torch.Tensor | None = None,
+) -> torch.Tensor:
     """Centre and scale per feature dimension using batch statistics.
 
     LLM hidden states are anisotropic (a few high-norm dimensions dominate), so
     a raw MSE target is mostly a norm term. Whitening makes the prediction loss
     about direction, which is what "content" means here.
+
+    Statistics are computed over real positions only when ``mask`` is given.
+    Padding would otherwise shift the mean and shrink the std in a way that
+    depends on the longest sequence in the batch.
     """
-    mean = x.mean(dim=tuple(range(x.ndim - 1)), keepdim=True)
-    std = x.std(dim=tuple(range(x.ndim - 1)), keepdim=True, unbiased=False)
-    return (x - mean) / (std + eps)
+    if mask is None:
+        mean = x.mean(dim=tuple(range(x.ndim - 1)), keepdim=True)
+        std = x.std(dim=tuple(range(x.ndim - 1)), keepdim=True, unbiased=False)
+        return (x - mean) / (std + eps)
+
+    if mask.shape != x.shape[:2]:
+        raise ValueError("mask must match the leading dimensions of x")
+    real = x[mask.bool()]
+    mean = real.mean(dim=0, keepdim=True)
+    std = real.std(dim=0, keepdim=True, unbiased=False)
+    out = (x - mean) / (std + eps)
+    # Keep padded positions at zero so downstream sums are unaffected.
+    return out * mask.unsqueeze(-1).to(out.dtype)

@@ -43,7 +43,9 @@ def token_windows(ids: list[int], length: int, n_windows: int = 4) -> list[list[
         raise ValueError("length must be positive")
     if len(ids) <= length:
         return [ids]
-    n = max(1, n_windows)
+    # Do not ask for more windows than there are distinct start positions; a
+    # short document would otherwise score the same tokens several times.
+    n = max(1, min(n_windows, len(ids) - length + 1))
     if n == 1:
         return [ids[:length]]
     starts = np.linspace(0, len(ids) - length, num=n, dtype=int)
@@ -104,8 +106,10 @@ def score_jsonl(
         return table
 
     lm = LM(model_id)
-    device = str(lm.model.device)
-    loss_fn = _model_loss_fn(lm, device)
+    # ``model.device`` is not reliable for a sharded/quantised model; the first
+    # parameter is. The embedding is the tensor the scorer actually indexes.
+    device = next(lm.model.parameters()).device
+    loss_fn = _model_loss_fn(lm, str(device))
     started = time.time()
     scored = 0
     for doc in todo:
