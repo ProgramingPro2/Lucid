@@ -69,6 +69,13 @@ def vicreg_terms(
     ``cov`` penalises correlation between feature dimensions. Together they make
     collapse expensive, which is the property the F10 ablation lacked.
 
+    The covariance term is computed on the **correlation** matrix, not the raw
+    covariance. LLM hidden states are anisotropic and their raw covariance
+    entries scale with the state magnitude: on Qwen3-1.7B this made the penalty
+    ~1.3e8 and swamped both the language-model and prediction losses. Dividing
+    each dimension by its own std makes the penalty dimensionless and bounded,
+    so the same weight means the same thing across models and layers.
+
     ``mask`` (B, T) selects real positions. Padding is a constant vector, so
     including it inflates the variance term and makes the penalty depend on
     sequence length rather than on representation quality.
@@ -87,12 +94,21 @@ def vicreg_terms(
         return z, z
 
     centred = flat - flat.mean(dim=0, keepdim=True)
-    std = torch.sqrt(centred.var(dim=0, unbiased=False) + eps)
+    var_d = centred.var(dim=0, unbiased=False)
+    # A *relative* eps keeps the correlation term exactly scale-invariant: the
+    # reference scales with the data, so multiplying the states by k changes
+    # both the variance and the eps by k^2 and leaves ``std / centred`` alone.
+    ref = var_d.mean().clamp_min(1e-12)
+    std = torch.sqrt(var_d + eps * ref)
     var = torch.relu(1.0 - std).mean()
 
-    cov = (centred.T @ centred) / max(n - 1, 1)
-    off = cov - torch.diag_embed(torch.diagonal(cov))
-    cov_pen = (off**2).sum() / d
+    # Per-dimension normalisation turns the covariance into a correlation
+    # matrix, whose off-diagonal entries lie in [-1, 1]. A collapsed dimension
+    # has ``centred == 0`` and contributes zero here; it is caught by ``var``.
+    normed = centred / std
+    corr = (normed.T @ normed) / max(n - 1, 1)
+    off = corr - torch.diag_embed(torch.diagonal(corr))
+    cov_pen = off.pow(2).sum() / (d * max(d - 1, 1))
     return var, cov_pen
 
 
@@ -106,9 +122,20 @@ def combined_loss(
     lambda_cov: float = 0.04,
     use_cosine: bool = True,
 ) -> tuple[torch.Tensor, dict]:
-    """JEPA prediction + VICReg regularisers."""
+    """JEPA prediction + VICReg regularisers.
+
+    The prediction term is computed on **whitened** states: raw cosine is
+    dominated by a shared anisotropic direction (cos ~0.97 before any training),
+    so it would measure nearly nothing. The regularisers are computed on the raw
+    student states, where the variance hinge is meaningful; ``vicreg_terms``
+    already makes the covariance term scale-invariant.
+    """
+    from .block import whiten
+
+    s_white = whiten(student_states, mask=mask)
+    t_white = whiten(teacher_states, mask=mask)
     pred, diag = jepa_loss(
-        student_states, teacher_states, delta, mask, use_cosine=use_cosine
+        s_white, t_white, delta, mask, use_cosine=use_cosine
     )
     var, cov = vicreg_terms(student_states, mask=mask)
     total = pred + lambda_var * var + lambda_cov * cov

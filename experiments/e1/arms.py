@@ -82,8 +82,14 @@ def build_block(d_model: int, n_heads: int = 8, **kw) -> nn.Module:
     return JEPABlock(d_model, n_heads=n_heads, **kw)
 
 
-def build_head(d_model: int) -> nn.Module:
-    """The A'/B' parameter-matched prediction head (no inserted block)."""
+def build_head(d_model: int, zero_init: bool = False) -> nn.Module:
+    """The A'/B' parameter-matched prediction head (no inserted block).
+
+    Unlike the block, this head is *not* in the language-model path, so a
+    zero output does not make A' and B' differ at step 0. It is therefore
+    initialised small-but-nonzero: the JEPA loss is a cosine, and a cosine of a
+    zero vector is undefined, which would make the first step a no-op.
+    """
 
     class Head(nn.Module):
         def __init__(self, d: int) -> None:
@@ -91,8 +97,12 @@ def build_head(d_model: int) -> nn.Module:
             self.net = nn.Sequential(
                 nn.Linear(d, d), nn.GELU(), nn.Linear(d, d)
             )
-            nn.init.zeros_(self.net[-1].weight)
-            nn.init.zeros_(self.net[-1].bias)
+            if zero_init:
+                nn.init.zeros_(self.net[-1].weight)
+                nn.init.zeros_(self.net[-1].bias)
+            else:
+                nn.init.normal_(self.net[-1].weight, std=1e-3)
+                nn.init.zeros_(self.net[-1].bias)
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             return self.net(x)

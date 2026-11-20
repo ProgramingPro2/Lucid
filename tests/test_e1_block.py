@@ -72,6 +72,47 @@ def test_whiten_mask_zeroes_padding_and_uses_real_statistics():
     assert torch.allclose(out[:, :4], unmasked, atol=1e-5)
 
 
+def test_ablation_zeroes_the_contribution():
+    torch.manual_seed(0)
+    block = JEPABlock(32, n_heads=4, zero_init_output=False)
+    x = torch.randn(2, 5, 32)
+    assert not torch.allclose(block(x), torch.zeros_like(x))
+    block.set_ablation(True)
+    assert torch.equal(block(x), torch.zeros_like(x))
+    assert torch.equal(block.apply_to(x), x)
+    block.set_ablation(False)
+    assert not torch.allclose(block(x), torch.zeros_like(x))
+
+
+def test_vicreg_covariance_is_scale_invariant_and_bounded():
+    """The covariance penalty must not scale with hidden-state magnitude.
+
+    Regression for the bug where raw Qwen3 hidden states (anisotropic, max abs
+    ~1e4) produced a penalty of ~1e8 and swamped both losses.
+    """
+    torch.manual_seed(0)
+    x = torch.randn(64, 32, dtype=torch.float64)
+    _, cov = vicreg_terms(x)
+    _, cov_big = vicreg_terms(x * 1000.0)
+    assert torch.allclose(cov, cov_big, atol=1e-10)
+    assert 0.0 <= float(cov) <= 1.0
+    assert 0.0 <= float(cov_big) <= 1.0
+
+
+def test_combined_loss_stays_small_on_anisotropic_states():
+    """A few huge outlier dimensions must not explode the total loss."""
+    torch.manual_seed(0)
+    student = torch.randn(2, 32, 64, dtype=torch.float64)
+    student[..., 0] *= 5000.0  # one dominant direction, as in a real LLM
+    teacher = student + 0.01 * torch.randn_like(student)
+    total, diag = combined_loss(student, teacher, delta=4)
+    assert float(total) < 10.0
+    assert all(
+        torch.isfinite(torch.tensor(v)).all()
+        for v in (diag["pred"], diag["var"], diag["cov"], diag["total"])
+    )
+
+
 def test_ema_moves_toward_student_and_never_requires_grad():
     student = torch.nn.Linear(4, 4)
     teacher = EMATeacher(student)

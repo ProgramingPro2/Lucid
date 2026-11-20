@@ -51,6 +51,13 @@ class JEPABlock(nn.Module):
         if zero_init_output:
             nn.init.zeros_(self.out.weight)
             nn.init.zeros_(self.out.bias)
+        # P3 (necessity) is measured by zeroing the block's *contribution* at
+        # evaluation. This flag is toggled by the harness, not trained.
+        self._ablated = False
+
+    def set_ablation(self, ablated: bool) -> None:
+        """Zero the block contribution for evaluation (P3)."""
+        self._ablated = bool(ablated)
 
     def forward(
         self, x: torch.Tensor, attention_mask: torch.Tensor | None = None
@@ -58,6 +65,10 @@ class JEPABlock(nn.Module):
         """Return the block's *contribution* to the residual stream."""
         if x.ndim != 3 or x.size(-1) != self.d_model:
             raise ValueError(f"expected (B,T,{self.d_model}), got {tuple(x.shape)}")
+        if self._ablated:
+            # Exactly zero, so ``apply_to`` is the identity. Using ``x * 0``
+            # keeps the autograd graph intact for any caller that differentiates.
+            return x * 0.0
 
         h = self.ln1(x)
         # ``nn.MultiheadAttention`` uses True to mean "ignore this key". Without
