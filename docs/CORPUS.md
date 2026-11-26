@@ -79,7 +79,7 @@ The replacement fixes all three: **dated, post-cutoff, document-intact, licence-
 
 | Role | Source | Licence | Size | Why |
 |---|---|---|---|---|
-| **Primary** | bioRxiv / medRxiv, postings dated **> model cutoff + 30 days** | CC-BY 4.0 for most; **read the per-item `license` field from the API**, exclude NC/ND if redistributing | ~120M tokens/month; 3–4 months ≈ 400M+ | Research-manuscript prose with natural sub-registers; short and datable exposure window — the best contamination profile available |
+| **Primary** | bioRxiv / medRxiv, postings dated **after 2025-05-29** (step 1) | CC-BY 4.0 for most; **read the per-item `license` field from the API**, exclude NC/ND if redistributing | ~120M tokens/month; 3–4 months ≈ 400M+ | Research-manuscript prose with natural sub-registers; short and datable exposure window — the best contamination profile available |
 | **Second register (held out)** | FDA prescribing information, DailyMed / Drugs@FDA, 2026 label versions keyed on `effective_time` | **US Government work — public domain** | ~1,500 labels × 10–30k ≈ 20–45M | A genuinely different register, which is what makes the cross-register endpoint a real generalisation test rather than a re-split |
 | **Replication only** | WikiText-103 test | as distributed | — | Kept solely as the comparability anchor to every prior number in the repo. **Never primary.** Its contamination is quantified (§6), not hidden. |
 
@@ -107,7 +107,7 @@ counted; the counts go into the corpus card.
 
 | # | Step | Rule |
 |---|---|---|
-| 1 | **Cutoff** | Read the base model's training-cutoff date from its model card and record it verbatim in the corpus card. Every downstream date test refers to this value, not to "recent". |
+| 1 | **Cutoff** | Record the base model's training cutoff in the corpus card and use that date, not "recent". For `Qwen/Qwen3-1.7B-Base` the card discloses none; the recorded value is the release-date proxy **2025-04-29**. Keep postings strictly after that date plus 30 days (after 2025-05-29). Revise the proxy only upward. The rule, the evidence, and the cost of the in-progress file are below. |
 | 2 | **Harvest** | Query by posting date. Keep only items with `date > cutoff + 30 days`. |
 | 3 | **Licence** | Read the per-item licence field. Keep CC-BY / CC0. Drop NC / ND unless the redistribution question is settled in writing. |
 | 4 | **Extract body text** | Strip tables, figure captions, reference lists, supplementary material, author lists, funding statements. Keep running prose only. |
@@ -120,6 +120,25 @@ counted; the counts go into the corpus card.
 
 Recommended split: 80 % train / 10 % dev / 10 % sealed test, by document.
 
+### Step 1 rule — undisclosed cutoff
+
+`Qwen/Qwen3-1.7B-Base` does not state a training cutoff. The recorded value is therefore not a date copied out of the card. It is a conservative proxy, and the card has to say so.
+
+Evidence, checked 2026-11-26:
+
+- The local weight snapshot `~/.cache/huggingface/hub/models--Qwen--Qwen3-1.7B-Base/snapshots/ea980cb0a6c2ae4b936e82123acc929f1cec04c1` (the same revision under `HF_HOME=/mnt/keepstar-extra/hf-cache`) has `config.json`, `generation_config.json`, the tokenizer files and `model.safetensors`. It has no `README.md`. `config.json` has no cutoff field.
+- The Hub card `https://huggingface.co/Qwen/Qwen3-1.7B-Base/raw/main/README.md` says "Qwen3 is pre-trained on 36 trillion tokens across 119 languages" and names coding, STEM, reasoning, books, multilingual and synthetic data. It states no knowledge-cutoff date. `cardData` is only `license` and `library_name`. The Hub `createdAt` is `2025-04-28T05:05:55.000Z` and the revision is `ea980cb0a6c2ae4b936e82123acc929f1cec04c1`.
+- The release announcement `https://qwenlm.github.io/blog/qwen3/` is dated April 29, 2025. The Qwen3 GitHub news line is "2025.04.29: We released the Qwen3 series." The pre-training section describes about 36 trillion tokens and three stages and states no cutoff date.
+- The technical report, arXiv:2505.09388 §3.1, says "All Qwen3 models are trained on a large and diverse dataset consisting of 119 languages and dialects, with a total of 36 trillion tokens." The report text does not contain the word "cutoff".
+
+Third-party pages that name a March 2025 or June 2024 cutoff were not used. They are not the model card, and both dates are earlier than the release. The proxy may not move earlier on the strength of them.
+
+Rule. When the model card discloses no cutoff, the programme cutoff is the model **release date**, 2025-04-29. That date is after the weights were already on the Hub (2025-04-28T05:05:55Z), so it is after any data that could have been in the training run. The existing 30-day grace still applies: the build keeps a posting only when its date is strictly after 2025-05-29, so the first retained posting is **2025-05-30**. This discards papers from the gap between the unknown true cutoff and the release, instead of risking contamination. The proxy can be revised only **upward** (a later date, which drops still more text). It is never revised downward.
+
+`2025-06-01` is not this value. It appears in the repo as the harvest CLI example, as `DEFAULT_CUTOFF` in `scripts/harvest_supervisor.py`, and as the month in the volume phrase "2025-06→2026-11". It is not on the model card. A build that is handed that date records it as an upward revision of the proxy and says it is not a model-card cutoff. A build handed `_pending_`, an empty cutoff, or no cutoff at all refuses to run.
+
+The in-progress file `artifacts/corpus/biorxiv_2026.jsonl` was opened with `--cutoff 2025-06-01`. Harvest windows start at that date plus 30 days, so the file begins on 2025-07-01. Do not retarget the running harvest and do not append an earlier window onto the same file: two cutoffs in one JSONL cannot be separated later. Relative to the proxy, the audit measured roughly **1,700 full-text documents and ~31M tokens** posted from 2025-05-30 up to this file's start on 2025-07-01 that are absent. Backfilling that slice requires a **separate corpus generation**, not an append. Rows already in the file are dated on or after 2025-07-01, which is after 2025-05-29, so they satisfy the proxy date gate. The missing slice is a coverage gap, not contamination of the rows that are present. The generated card says this in `coverage_note` when the earliest row is after 2025-05-30.
+
 ---
 
 ## 5. Gates
@@ -128,10 +147,14 @@ Recommended split: 80 % train / 10 % dev / 10 % sealed test, by document.
 |---|---|---|
 | **G-1a size** | ≥ 500M tokens, ≥ 3,000 documents | harvest another month; do not shrink the run budget |
 | **G-1b licence** | 100 % of retained documents carry a machine-read licence string | drop the unclassifiable; if that exceeds 20 %, change source |
-| **G-1c integrity** | Every document has ≥ 1 complete section and no shuffled paragraphs | re-extract |
+| **G-1c integrity** | Every retained document has ≥ 1 complete section and no shuffled paragraphs. On a harvested bioRxiv/medRxiv row the fulltext status is exactly `ok` | re-extract. A failed fetch (`error:*`) or an `abstract_only` row is not a document |
 | **G-1d split** | Zero documents shared across train / dev / test | re-split |
 | **G-1e hash** | Token-stream SHA-256 reproducible from a clean rebuild | fix the build; a non-reproducible stream voids every downstream arm |
 | **G-1f register** | Sealed second register (FDA) present and untouched | required for the cross-register endpoint only |
+
+The fulltext-status check is its own gate. It runs on every harvested row before the licence gate, and the card records both `drops_by_reason.not_fulltext` and `fulltext_status_counts` (the per-status census of the whole harvest). A cc-by abstract is dropped because its status is `abstract_only`. The same row is dropped when the licence would have allowed it and when the licence would have rejected it, and the census counts it either way. Raising the length floor does not close this: failed fetches in the live file include rows over 2,000 characters.
+
+`--allow-degraded` is the only way to keep a non-`ok` status. It prints a warning on stderr and sets `g1c_compliant` to false with a verdict that says **NOT G-1c compliant**. A degraded card must not be cited as a gate pass. The default build does not take that flag.
 
 ---
 
@@ -181,9 +204,10 @@ WikiText-103 test**. A large positive value means the model has seen the benchma
 
 | Field | Value |
 |---|---|
-| Base model and recorded cutoff | _pending_ |
+| Base model and recorded cutoff | `Qwen/Qwen3-1.7B-Base`; **2025-04-29**. Provenance: release-date proxy (`kind: release-date-proxy`), model-card cutoff null, weights uploaded 2025-04-28T05:05:55Z, snapshot `ea980cb0a6c2ae4b936e82123acc929f1cec04c1`, grace 30 days, first retained posting 2025-05-30, revision policy upward-only. Evidence: the local snapshot has no README and `config.json` has no cutoff field; the Hub README (36 trillion tokens, 119 languages) states no cutoff; the 2025-04-29 announcement and arXiv:2505.09388 §3.1 state none either. Justification: no model card, config, or Qwen3 paper states a cutoff, so the cutoff is the 2025-04-29 release date; with the 30-day grace this keeps only postings after 2025-05-29, and the date may move later but never earlier. |
+| G-1c verdict | Written by the build as `g1c_compliant` and `g1c_verdict`. The default drops non-`ok` fulltext. `--allow-degraded` is NOT G-1c compliant. |
 | Sources and per-source licence counts | _pending_ |
-| Documents harvested / dropped, by reason | _pending_ |
+| Documents harvested / dropped, by reason | Written by the build into `card.json` as `drops_by_reason` and `fulltext_status_counts`. Totals move until the harvest is finished. |
 | Tokens per stratum | _pending_ |
 | NLL decile distribution | _pending_ |
 | Contamination gap (primary vs WikiText) | _pending_ |

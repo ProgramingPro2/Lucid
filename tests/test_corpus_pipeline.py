@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date
 
 import pytest
 
-from experiments.corpus.build import build
+from experiments.corpus.build import DEGRADED_WARNING, build
 from experiments.corpus.pipeline import (
     CARD_KEYS,
     build_card,
@@ -19,6 +20,7 @@ from experiments.corpus.pipeline import (
     drop_low_nll,
     filter_by_date,
     filter_by_license,
+    fulltext_status_reason,
     split_documents,
     token_stream_sha256,
 )
@@ -289,3 +291,230 @@ def test_dry_run_is_reproducible(tmp_path):
     a = build(source="fake", cutoff="2025-01-01", out=tmp_path / "a", dry_run=True)
     b = build(source="fake", cutoff="2025-01-01", out=tmp_path / "b", dry_run=True)
     assert a["manifest"]["token_stream_sha256"] == b["manifest"]["token_stream_sha256"]
+
+
+# --------------------------------------------------------------------------
+# G-1c fulltext status. The old default kept a non-ok row whenever
+# --require-fulltext was left off. No existing test asserted that default;
+# these tests pin the new one. tests/test_corpus_harvest.py still calls
+# build(..., require_fulltext=True) and is not edited here.
+# --------------------------------------------------------------------------
+
+
+def _row(
+    doc_id: str,
+    *,
+    fulltext: str | None,
+    license: str = "cc-by",
+    text: str | None = None,
+    sections: dict | None = None,
+    posted: str | None = None,
+) -> dict:
+    body = text if text is not None else ("Running prose about a receptor pathway. " * 80)
+    return {
+        "doc_id": doc_id,
+        "source": "biorxiv",
+        "title": "t",
+        "text": body,
+        "sections": sections if sections is not None else {"methods": body},
+        "license": license,
+        "date": posted or date.today().isoformat(),
+        "meta": {} if fulltext is None else {"fulltext": fulltext},
+    }
+
+
+def _write_jsonl(path, rows: list[dict]) -> None:
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+
+def test_fulltext_status_buckets_the_exception_class():
+    failed = doc("e")
+    failed.source = "biorxiv"
+    failed.meta["fulltext"] = (
+        "error:TransientRequestError: transient failure after retries"
+    )
+    assert fulltext_status_reason(failed) == "error:TransientRequestError"
+    abstract = doc("a")
+    abstract.source = "biorxiv"
+    abstract.meta["fulltext"] = "abstract_only"
+    assert fulltext_status_reason(abstract) == "abstract_only"
+    # A synthetic row has no harvest status and is not a failed fetch.
+    assert fulltext_status_reason(doc("fake")) is None
+    bare = doc("missing")
+    bare.source = "biorxiv"
+    assert fulltext_status_reason(bare) == "missing"
+
+
+def test_default_build_drops_non_ok_fulltext_independent_of_licence(tmp_path):
+    """cc-by error and abstract rows must not survive, and a bad-licence
+    abstract is counted as abstract_only rather than only as a licence drop.
+
+    The error row is longer than 2,000 characters, so the length floor is
+    not what excludes it. require_fulltext is left at its default, off.
+    """
+    long_error = "Running prose about a failed fetch. " * 80  # > 2000 chars
+    assert len(long_error) > 2000
+    rows = [
+        _row("ok", fulltext="ok"),
+        _row("error_cc_by", fulltext="error:RuntimeError", text=long_error),
+        _row("abstract_cc_by", fulltext="abstract_only"),
+        _row("abstract_nc", fulltext="abstract_only", license="CC BY-NC 4.0"),
+        _row("nosection", fulltext="ok", sections={}, text="prose " * 40),
+    ]
+    path = tmp_path / "docs.jsonl"
+    _write_jsonl(path, rows)
+    result = build(
+        source="biorxiv",
+        cutoff="2025-01-01",
+        out=tmp_path / "out",
+        docs_jsonl=path,
+        dry_run=True,
+    )
+    assert result["drops"]["not_fulltext"] == 3
+    assert result["drops"]["no_complete_section"] == 1
+    assert result["drops"].get("too_short", 0) == 0
+    assert result["drops"].get("licence:cc-by-nc-4.0", 0) == 0
+    assert result["card"]["fulltext_status_counts"] == {
+        "abstract_only": 2,
+        "error:RuntimeError": 1,
+    }
+    assert result["card"]["documents_retained"] == 1
+    assert result["card"]["g1c_compliant"] is True
+    assert result["card"]["g1c_verdict"].startswith("G-1c pass")
+
+
+def test_allow_degraded_keeps_the_error_and_fails_g1c(tmp_path, capsys):
+    rows = [
+        _row("ok", fulltext="ok"),
+        _row(
+            "error_cc_by",
+            fulltext="error:RuntimeError",
+            text="A different failed-fetch abstract about mosquito bitter taste. " * 40,
+        ),
+    ]
+    path = tmp_path / "docs.jsonl"
+    _write_jsonl(path, rows)
+    result = build(
+        source="biorxiv",
+        cutoff="2025-01-01",
+        out=tmp_path / "out",
+        docs_jsonl=path,
+        dry_run=True,
+        allow_degraded=True,
+    )
+    err = capsys.readouterr().err
+    assert DEGRADED_WARNING in err
+    assert "NOT G-1c compliant" in err
+    assert result["drops"].get("not_fulltext", 0) == 0
+    assert result["card"]["fulltext_status_counts"] == {"error:RuntimeError": 1}
+    assert result["card"]["documents_retained"] == 2
+    assert result["card"]["g1c_compliant"] is False
+    assert result["card"]["g1c_verdict"].startswith("NOT G-1c compliant")
+    written = json.loads((tmp_path / "out" / "card.json").read_text())
+    assert written["g1c_compliant"] is False
+    assert "NOT G-1c compliant" in written["g1c_verdict"]
+
+
+# --------------------------------------------------------------------------
+# Cutoff provenance. An unrecorded cutoff used to be a placeholder the build
+# would accept as soon as it parsed as... it didn't parse, but nothing said
+# the card had to carry a defensible date. These tests make _pending_ and an
+# absent cutoff unshippable, and they stop 2025-06-01 being labelled as the
+# model card.
+# --------------------------------------------------------------------------
+
+
+def test_build_refuses_an_unrecorded_cutoff(tmp_path):
+    from experiments.corpus.build import main
+    from experiments.corpus.sources import UnrecordedCutoff
+
+    with pytest.raises(UnrecordedCutoff, match="unrecorded"):
+        build(source="fake", cutoff="_pending_", out=tmp_path / "a", dry_run=True)
+    with pytest.raises(UnrecordedCutoff, match="absent"):
+        build(source="fake", cutoff=None, out=tmp_path / "b", dry_run=True)
+    with pytest.raises(UnrecordedCutoff, match="unrecorded"):
+        build(source="fake", cutoff="", out=tmp_path / "c", dry_run=True)
+    with pytest.raises(UnrecordedCutoff, match="unrecorded"):
+        build(source="fake", cutoff="pending", out=tmp_path / "d", dry_run=True)
+
+    pending = tmp_path / "pending.json"
+    pending.write_text(json.dumps({"cutoff": "_pending_"}))
+    with pytest.raises(UnrecordedCutoff):
+        build(source="fake", cutoff=str(pending), out=tmp_path / "e", dry_run=True)
+
+    absent = tmp_path / "absent.json"
+    absent.write_text("{}")
+    with pytest.raises(UnrecordedCutoff):
+        build(source="fake", cutoff=str(absent), out=tmp_path / "f", dry_run=True)
+
+    null = tmp_path / "null.json"
+    null.write_text('{"cutoff": null}')
+    with pytest.raises(UnrecordedCutoff):
+        build(source="fake", cutoff=str(null), out=tmp_path / "g", dry_run=True)
+
+    # No card is written when the build refuses.
+    assert not (tmp_path / "a" / "card.json").exists()
+    code = main(
+        [
+            "--source",
+            "fake",
+            "--cutoff",
+            "_pending_",
+            "--dry-run",
+            "--out",
+            str(tmp_path / "cli"),
+        ]
+    )
+    assert code == 2
+    assert not (tmp_path / "cli" / "card.json").exists()
+
+
+def test_programme_cutoff_records_provenance_and_evidence(tmp_path):
+    from experiments.corpus.sources import (
+        PROGRAMME_CUTOFF,
+        first_retained_posting,
+    )
+
+    assert first_retained_posting("2025-04-29") == "2025-05-30"
+    result = build(
+        source="fake",
+        cutoff=PROGRAMME_CUTOFF,
+        out=tmp_path,
+        dry_run=True,
+    )
+    card = result["card"]
+    assert card["recorded_cutoff"] == "2025-04-29"
+    assert card["base_model"] == "Qwen/Qwen3-1.7B-Base"
+    assert card["cutoff_compliant"] is True
+    provenance = card["cutoff_provenance"]
+    assert provenance["kind"] == "release-date-proxy"
+    assert provenance["model_card_cutoff"] is None
+    assert provenance["release_date"] == "2025-04-29"
+    assert provenance["weights_uploaded"] == "2025-04-28T05:05:55Z"
+    assert provenance["programme_first_retained_posting"] == "2025-05-30"
+    assert provenance["revision_policy"] == "upward-only"
+    assert "2025-04-29" in card["cutoff_justification"]
+    assert "never earlier" in card["cutoff_justification"]
+    blob = json.dumps(card["cutoff_evidence"])
+    assert "36 trillion tokens" in blob
+    assert "no README.md" in blob
+    assert "2505.09388" in blob
+    assert "2025.04.29" in blob
+
+
+def test_june_cutoff_is_an_upward_revision_not_the_model_card(tmp_path):
+    result = build(source="fake", cutoff="2025-06-01", out=tmp_path, dry_run=True)
+    card = result["card"]
+    assert card["recorded_cutoff"] == "2025-06-01"
+    assert card["cutoff_provenance"]["kind"] == "upward-revision"
+    assert card["cutoff_provenance"]["model_card_cutoff"] is None
+    assert card["cutoff_compliant"] is True
+    assert "not a model-card cutoff" in card["cutoff_justification"]
+
+
+def test_cutoff_earlier_than_the_proxy_is_not_compliant(tmp_path):
+    result = build(source="fake", cutoff="2025-01-01", out=tmp_path, dry_run=True)
+    card = result["card"]
+    assert card["recorded_cutoff"] == "2025-01-01"
+    assert card["cutoff_compliant"] is False
+    assert card["cutoff_provenance"]["kind"] == "earlier-than-proxy"

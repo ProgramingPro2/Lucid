@@ -73,6 +73,76 @@ def filter_by_license(
 
 
 # --------------------------------------------------------------------------
+# 3b. fulltext status (G-1c) — independent of the licence gate
+# --------------------------------------------------------------------------
+
+_HARVEST_SOURCES = frozenset({"biorxiv", "medrxiv"})
+
+
+def fulltext_status_reason(doc: Document) -> str | None:
+    """Why ``doc`` fails the fulltext-status gate, or ``None`` if it passes.
+
+    The decision reads ``meta.fulltext`` only. Licence is not consulted, so an
+    abstract or a failed fetch cannot survive by having an allowed licence, and
+    a bad licence cannot hide an ``abstract_only`` row from this count.
+
+    A bioRxiv or medRxiv row must be exactly ``ok``. Any other status,
+    including a missing one, is a failed or skipped fetch. Synthetic and FDA
+    rows have no harvest status; they pass unless they carry an explicit
+    non-``ok`` status.
+    """
+    status = doc.meta.get("fulltext")
+    if status == "ok":
+        return None
+    if status is None and str(doc.source).lower() not in _HARVEST_SOURCES:
+        return None
+    if not isinstance(status, str) or not status.strip():
+        return "missing"
+    if status.startswith("error:"):
+        label = status.split(":", 2)[1].strip()
+        return f"error:{label or 'unknown'}"
+    return status
+
+
+def filter_by_fulltext_status(
+    docs: list[Document],
+) -> tuple[list[Document], Counter[str]]:
+    """Drop rows whose fulltext status is not ``ok``.
+
+    Returns ``(kept, counts)`` where ``counts`` maps a status bucket
+    (``abstract_only``, ``error:RuntimeError``, ``missing``, …) to the number
+    of rows. The count is taken over every input row, before the licence gate.
+    """
+    kept: list[Document] = []
+    counts: Counter[str] = Counter()
+    for doc in docs:
+        reason = fulltext_status_reason(doc)
+        if reason is None:
+            kept.append(doc)
+        else:
+            counts[reason] += 1
+    return kept, counts
+
+
+def filter_complete_sections(
+    docs: list[Document],
+) -> tuple[list[Document], list[Document]]:
+    """Keep documents that still have at least one non-empty section.
+
+    G-1c requires a complete section. A row whose cleaned body has none is
+    not a document, whatever its licence or length.
+    """
+    kept: list[Document] = []
+    dropped: list[Document] = []
+    for doc in docs:
+        if any(text.strip() for text in doc.sections.values()):
+            kept.append(doc)
+        else:
+            dropped.append(doc)
+    return kept, dropped
+
+
+# --------------------------------------------------------------------------
 # 4. body text
 # --------------------------------------------------------------------------
 
@@ -312,6 +382,16 @@ CARD_KEYS: tuple[str, ...] = (
     "token_stream_sha256",
     "split_counts",
     "sealed_test_key_holder",
+    "g1c_compliant",
+    "g1c_verdict",
+    "fulltext_status_counts",
+    "cutoff_provenance",
+    "cutoff_evidence",
+    "cutoff_justification",
+    "cutoff_compliant",
+    "source_date_min",
+    "source_date_max",
+    "coverage_note",
 )
 
 
@@ -347,6 +427,16 @@ def build_card(
         "token_stream_sha256": extra.get("token_stream_sha256", "pending"),
         "split_counts": {k: len(v) for k, v in splits.items()},
         "sealed_test_key_holder": extra.get("sealed_test_key_holder", "pending"),
+        "g1c_compliant": bool(extra.get("g1c_compliant", False)),
+        "g1c_verdict": extra.get("g1c_verdict", "pending"),
+        "fulltext_status_counts": dict(extra.get("fulltext_status_counts") or {}),
+        "cutoff_provenance": extra.get("cutoff_provenance", "pending"),
+        "cutoff_evidence": extra.get("cutoff_evidence", "pending"),
+        "cutoff_justification": extra.get("cutoff_justification", "pending"),
+        "cutoff_compliant": bool(extra.get("cutoff_compliant", False)),
+        "source_date_min": extra.get("source_date_min"),
+        "source_date_max": extra.get("source_date_max"),
+        "coverage_note": extra.get("coverage_note", ""),
     }
     missing = [k for k in CARD_KEYS if k not in card]
     if missing:

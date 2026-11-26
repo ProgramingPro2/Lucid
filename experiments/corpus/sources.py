@@ -108,22 +108,113 @@ class Document:
 # Cutoff
 # --------------------------------------------------------------------------
 
+# Qwen/Qwen3-1.7B-Base discloses no training cutoff. The programme proxy is
+# the release date. It may be replaced only by a later date. See docs/CORPUS.md
+# step 1. Do not move this earlier: an earlier date can admit contaminated text.
+PROGRAMME_BASE_MODEL = "Qwen/Qwen3-1.7B-Base"
+PROGRAMME_CUTOFF = "2025-04-29"
+PROGRAMME_CUTOFF_GRACE_DAYS = 30
+PROGRAMME_SNAPSHOT = "ea980cb0a6c2ae4b936e82123acc929f1cec04c1"
+PROGRAMME_WEIGHTS_UPLOADED = "2025-04-28T05:05:55Z"
 
-def load_cutoff(path_or_date: str | Path) -> str:
-    """Read the model's recorded training cutoff.
+PROGRAMME_CUTOFF_JUSTIFICATION = (
+    "No model card, config, or Qwen3 paper states a cutoff, so the cutoff is "
+    "the 2025-04-29 release date; with the 30-day grace this keeps only "
+    "postings after 2025-05-29, and the date may move later but never earlier."
+)
 
-    Accepts either an ISO date or a JSON file with a ``"cutoff"`` key. It never
-    guesses: docs/CORPUS.md step 1 requires the value to be read verbatim from the
-    model card, because "recent" is not a date test.
+# Quoted from the sources named. The absence of a cutoff is the finding.
+PROGRAMME_CUTOFF_EVIDENCE: tuple[dict[str, str], ...] = (
+    {
+        "source": (
+            "local snapshot ~/.cache/huggingface/hub/models--Qwen--Qwen3-1.7B-Base/"
+            f"snapshots/{PROGRAMME_SNAPSHOT} (same revision under "
+            "HF_HOME=/mnt/keepstar-extra/hf-cache)"
+        ),
+        "quote": (
+            "The snapshot contains config.json, generation_config.json, the "
+            "tokenizer files and model.safetensors, and no README.md. "
+            "config.json lists architecture fields only; it has no cutoff key."
+        ),
+    },
+    {
+        "source": "https://huggingface.co/Qwen/Qwen3-1.7B-Base/raw/main/README.md",
+        "quote": (
+            "Qwen3 is pre-trained on 36 trillion tokens across 119 languages "
+            "— tripling the language coverage of Qwen2.5 — with a much richer "
+            "mix of high-quality data, including coding, STEM, reasoning, "
+            "book, multilingual, and synthetic data. The README and the Hub "
+            "cardData (license, library_name) state no knowledge-cutoff date. "
+            "Hub createdAt is 2025-04-28T05:05:55.000Z and the revision is "
+            f"{PROGRAMME_SNAPSHOT}."
+        ),
+    },
+    {
+        "source": "https://qwenlm.github.io/blog/qwen3/ and https://github.com/QwenLM/Qwen3",
+        "quote": (
+            "The release announcement is dated April 29, 2025. GitHub news: "
+            "'2025.04.29: We released the Qwen3 series.' The pre-training "
+            "section describes about 36 trillion tokens and three stages and "
+            "states no cutoff date."
+        ),
+    },
+    {
+        "source": "https://arxiv.org/abs/2505.09388 section 3.1",
+        "quote": (
+            "All Qwen3 models are trained on a large and diverse dataset "
+            "consisting of 119 languages and dialects, with a total of 36 "
+            "trillion tokens. The report text contains no occurrence of the "
+            "word cutoff."
+        ),
+    },
+)
+
+_UNRECORDED_CUTOFFS = frozenset(
+    {"", "_pending_", "pending", "none", "null", "tbd", "n/a", "na"}
+)
+
+
+class UnrecordedCutoff(ValueError):
+    """The build would ship with no date that can support the contamination claim."""
+
+
+def _is_unrecorded(value: object) -> bool:
+    if value is None:
+        return True
+    return str(value).strip().lower() in _UNRECORDED_CUTOFFS
+
+
+def _refuse_unrecorded(value: object, where: str) -> None:
+    raise UnrecordedCutoff(
+        f"refusing to build: cutoff is unrecorded ({value!r}{where}). "
+        "docs/CORPUS.md step 1 requires a recorded date. An unrecorded cutoff "
+        f"cannot ship. The programme proxy for {PROGRAMME_BASE_MODEL} is "
+        f"{PROGRAMME_CUTOFF} (release date; revise only upward)."
+    )
+
+
+def load_cutoff(path_or_date: str | Path | None) -> str:
+    """Read a recorded training cutoff.
+
+    Accepts an ISO date or a JSON file with a ``"cutoff"`` key. ``_pending_``,
+    an empty value, JSON ``null``, and a missing key are refused: an unrecorded
+    cutoff cannot ship. This function does not substitute the programme proxy.
+    The caller has to pass a date, and the card then says whether that date is
+    the proxy, an upward revision, or earlier than the proxy.
     """
+    if path_or_date is None:
+        _refuse_unrecorded(None, ", absent")
+
     p = Path(path_or_date)
     if p.suffix.lower() == ".json" and p.exists():
         payload = json.loads(p.read_text())
-        if "cutoff" not in payload:
-            raise KeyError(f"{p} has no 'cutoff' key")
+        if "cutoff" not in payload or _is_unrecorded(payload.get("cutoff")):
+            _refuse_unrecorded(payload.get("cutoff"), f" in {p}")
         value = payload["cutoff"]
     else:
         value = str(path_or_date)
+        if _is_unrecorded(value):
+            _refuse_unrecorded(value, "")
 
     try:
         date.fromisoformat(str(value)[:10])
@@ -134,9 +225,63 @@ def load_cutoff(path_or_date: str | Path) -> str:
     return str(value)[:10]
 
 
-def cutoff_plus_grace(cutoff: str, grace_days: int = 30) -> date:
-    """The first date a document may have: strictly after cutoff + grace."""
+def cutoff_plus_grace(cutoff: str, grace_days: int = PROGRAMME_CUTOFF_GRACE_DAYS) -> date:
+    """Boundary date excluded by the build: keep documents strictly after this."""
     return date.fromisoformat(cutoff[:10]) + timedelta(days=grace_days)
+
+
+def first_retained_posting(
+    cutoff: str, grace_days: int = PROGRAMME_CUTOFF_GRACE_DAYS
+) -> str:
+    """First calendar day the build keeps: the day after ``cutoff + grace``."""
+    return (cutoff_plus_grace(cutoff, grace_days) + timedelta(days=1)).isoformat()
+
+
+def cutoff_record(cutoff: str) -> dict:
+    """Provenance for one build's cutoff, against the documented proxy.
+
+    The evidence is always the model-card finding (no disclosed cutoff). The
+    kind says what this run did with that finding. A date earlier than the
+    proxy is recorded and marked non-compliant; it is not rewritten.
+    """
+    supplied = date.fromisoformat(cutoff[:10])
+    proxy = date.fromisoformat(PROGRAMME_CUTOFF)
+    if supplied == proxy:
+        kind = "release-date-proxy"
+        compliant = True
+        justification = PROGRAMME_CUTOFF_JUSTIFICATION
+    elif supplied > proxy:
+        kind = "upward-revision"
+        compliant = True
+        justification = (
+            f"Operator date {cutoff[:10]} is later than the release-date proxy "
+            f"{PROGRAMME_CUTOFF}. An upward revision is allowed and discards "
+            "more data. This date is not a model-card cutoff."
+        )
+    else:
+        kind = "earlier-than-proxy"
+        compliant = False
+        justification = (
+            f"Operator date {cutoff[:10]} is earlier than the documented proxy "
+            f"{PROGRAMME_CUTOFF}. An earlier cutoff can admit contaminated text "
+            "and cannot support a G-1 contamination claim."
+        )
+    return {
+        "kind": kind,
+        "value": cutoff[:10],
+        "base_model": PROGRAMME_BASE_MODEL,
+        "model_card_cutoff": None,
+        "release_date": PROGRAMME_CUTOFF,
+        "weights_uploaded": PROGRAMME_WEIGHTS_UPLOADED,
+        "snapshot": PROGRAMME_SNAPSHOT,
+        "grace_days": PROGRAMME_CUTOFF_GRACE_DAYS,
+        "programme_first_retained_posting": first_retained_posting(PROGRAMME_CUTOFF),
+        "this_run_first_retained_posting": first_retained_posting(cutoff),
+        "revision_policy": "upward-only",
+        "evidence": [dict(item) for item in PROGRAMME_CUTOFF_EVIDENCE],
+        "justification": justification,
+        "compliant": compliant,
+    }
 
 
 # --------------------------------------------------------------------------
@@ -541,8 +686,9 @@ class BioRxivClient:
         """Attach JATS full text to an allowed-licence document.
 
         A failure is recorded on the document rather than raised: one blocked
-        paper must not abort a multi-hour harvest. The build can then drop
-        abstract-only documents explicitly (``--require-fulltext``).
+        paper must not abort a multi-hour harvest. The build drops every
+        status other than ``ok`` by default (G-1c). ``--allow-degraded``
+        keeps those rows and marks the card non-compliant.
         """
         url = doc.meta.get("jatsxml")
         if not url:
