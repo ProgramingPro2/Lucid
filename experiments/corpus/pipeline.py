@@ -372,6 +372,8 @@ def token_stream_sha256(docs: list[Document], tokeniser) -> str:
 CARD_KEYS: tuple[str, ...] = (
     "base_model",
     "recorded_cutoff",
+    "release_date_proxy",
+    "operative_harvest_cutoff",
     "sources",
     "documents_harvested",
     "drops_by_reason",
@@ -417,6 +419,11 @@ def build_card(
     card = {
         "base_model": extra.get("base_model", "pending"),
         "recorded_cutoff": cutoff,
+        # The proxy and the harvest cutoff are peers. ``recorded_cutoff`` is
+        # only the date the build's date gate was handed, and it must not be
+        # the only place an auditor can look.
+        "release_date_proxy": extra.get("release_date_proxy", "pending"),
+        "operative_harvest_cutoff": extra.get("operative_harvest_cutoff", cutoff),
         "sources": dict(sorted(sources.items())),
         "documents_harvested": extra.get("documents_harvested", len(docs)),
         "drops_by_reason": dict(sorted(drops.items())),

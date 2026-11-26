@@ -484,6 +484,8 @@ def test_programme_cutoff_records_provenance_and_evidence(tmp_path):
     )
     card = result["card"]
     assert card["recorded_cutoff"] == "2025-04-29"
+    assert card["release_date_proxy"] == "2025-04-29"
+    assert card["operative_harvest_cutoff"] == "2025-04-29"
     assert card["base_model"] == "Qwen/Qwen3-1.7B-Base"
     assert card["cutoff_compliant"] is True
     provenance = card["cutoff_provenance"]
@@ -506,9 +508,14 @@ def test_june_cutoff_is_an_upward_revision_not_the_model_card(tmp_path):
     result = build(source="fake", cutoff="2025-06-01", out=tmp_path, dry_run=True)
     card = result["card"]
     assert card["recorded_cutoff"] == "2025-06-01"
+    assert card["release_date_proxy"] == "2025-04-29"
+    assert card["operative_harvest_cutoff"] == "2025-06-01"
     assert card["cutoff_provenance"]["kind"] == "upward-revision"
     assert card["cutoff_provenance"]["model_card_cutoff"] is None
+    assert card["cutoff_provenance"]["release_date_proxy"] == "2025-04-29"
+    assert card["cutoff_provenance"]["operative_harvest_cutoff"] == "2025-06-01"
     assert card["cutoff_compliant"] is True
+    assert "strictly more conservative" in card["cutoff_justification"]
     assert "not a model-card cutoff" in card["cutoff_justification"]
 
 
@@ -516,5 +523,100 @@ def test_cutoff_earlier_than_the_proxy_is_not_compliant(tmp_path):
     result = build(source="fake", cutoff="2025-01-01", out=tmp_path, dry_run=True)
     card = result["card"]
     assert card["recorded_cutoff"] == "2025-01-01"
+    assert card["release_date_proxy"] == "2025-04-29"
+    assert card["operative_harvest_cutoff"] == "2025-01-01"
     assert card["cutoff_compliant"] is False
     assert card["cutoff_provenance"]["kind"] == "earlier-than-proxy"
+
+
+def _harvest_row(doc_id: str, posted: str, fulltext: str = "ok") -> dict:
+    text = "Methods. A receptor pathway was measured in the cohort."
+    return {
+        "doc_id": doc_id,
+        "source": "biorxiv",
+        "title": "A study",
+        "text": text,
+        "sections": {"methods": text},
+        "license": "CC BY 4.0",
+        "date": posted,
+        "meta": {"fulltext": fulltext, "stratum": "methods"},
+    }
+
+
+def _write_jsonl(path, rows: list[dict]) -> None:
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+
+def test_in_progress_file_keeps_the_harvest_cutoff_beside_the_proxy(tmp_path):
+    """Passing the proxy to the date gate must not hide 2025-06-01."""
+    path = tmp_path / "biorxiv_2026.jsonl"
+    _write_jsonl(
+        path,
+        [
+            _harvest_row("a", "2025-07-01"),
+            _harvest_row("b", "2025-08-01"),
+        ],
+    )
+    result = build(
+        source="biorxiv",
+        cutoff="2025-04-29",
+        out=tmp_path / "out",
+        dry_run=True,
+        docs_jsonl=path,
+    )
+    card = result["card"]
+    assert card["release_date_proxy"] == "2025-04-29"
+    assert card["operative_harvest_cutoff"] == "2025-06-01"
+    assert card["recorded_cutoff"] == "2025-04-29"
+    assert card["cutoff_provenance"]["model_card_cutoff"] is None
+    assert card["cutoff_provenance"]["operative_harvest_cutoff"] == "2025-06-01"
+    note = card["coverage_note"]
+    assert "2025-05-30..2025-07-01" in note
+    assert "separate corpus generation" in note
+    assert "not an append" in note
+    assert "strictly more conservative" in note
+    assert "2025-06-01" in note
+    assert "dropped as date" not in note
+    assert "not a model-card cutoff" in card["cutoff_justification"]
+
+
+def test_in_progress_file_built_at_the_harvest_cutoff_is_an_upward_revision(tmp_path):
+    path = tmp_path / "nested" / "biorxiv_2026.jsonl"
+    path.parent.mkdir()
+    _write_jsonl(path, [_harvest_row("a", "2025-07-01"), _harvest_row("b", "2025-08-15")])
+    result = build(
+        source="biorxiv",
+        cutoff="2025-06-01",
+        out=tmp_path / "out",
+        dry_run=True,
+        docs_jsonl=path,
+    )
+    card = result["card"]
+    assert card["recorded_cutoff"] == "2025-06-01"
+    assert card["release_date_proxy"] == "2025-04-29"
+    assert card["operative_harvest_cutoff"] == "2025-06-01"
+    assert card["cutoff_provenance"]["kind"] == "upward-revision"
+    assert "2025-05-30..2025-07-01" in card["coverage_note"]
+    assert "separate corpus generation" in card["coverage_note"]
+    assert "strictly more conservative" in card["coverage_note"]
+    assert "strictly after 2025-07-01" in card["coverage_note"]
+    assert "dropped as date" in card["coverage_note"]
+    assert "not a model-card cutoff" in card["cutoff_justification"]
+
+
+def test_another_file_does_not_inherit_the_in_progress_harvest_cutoff(tmp_path):
+    path = tmp_path / "other.jsonl"
+    _write_jsonl(path, [_harvest_row("a", "2025-07-01")])
+    result = build(
+        source="biorxiv",
+        cutoff="2025-04-29",
+        out=tmp_path / "out",
+        dry_run=True,
+        docs_jsonl=path,
+    )
+    card = result["card"]
+    assert card["operative_harvest_cutoff"] == "2025-04-29"
+    assert card["release_date_proxy"] == "2025-04-29"
+    assert "2025-05-30..2025-07-01" in card["coverage_note"]
+    assert "separate corpus generation" in card["coverage_note"]
+    assert "strictly more conservative" not in card["coverage_note"]

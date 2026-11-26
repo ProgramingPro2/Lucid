@@ -42,9 +42,11 @@ from .sources import (
     FakeClient,
     FdaLabelClient,
     UnrecordedCutoff,
+    cutoff_plus_grace,
     cutoff_record,
     first_retained_posting,
     load_cutoff,
+    resolve_operative_harvest_cutoff,
 )
 
 _STRATA = ("abstract", "introduction", "methods", "results", "discussion")
@@ -199,6 +201,19 @@ def build(
     out_dir = Path(out)
     cutoff = load_cutoff(cutoff)
     record = cutoff_record(cutoff)
+    # The date gate (`cutoff`) and the harvest the file was opened with are
+    # different facts. The in-progress JSONL keeps its harvest cutoff even
+    # when this build is handed the release-date proxy.
+    operative = resolve_operative_harvest_cutoff(cutoff, docs_jsonl)
+    justification = record["justification"]
+    if operative != cutoff:
+        justification += (
+            f" The operative harvest cutoff for this file is {operative}, "
+            f"later than the release-date proxy {record['release_date']}, so "
+            f"it is strictly more conservative. The date gate was handed "
+            f"{cutoff}; that does not replace the cutoff the harvest was "
+            f"opened with, and {operative} is not a model-card cutoff."
+        )
 
     drops: Counter[str] = Counter()
     if docs_jsonl:
@@ -306,12 +321,32 @@ def build(
     programme_first = date.fromisoformat(first_retained_posting(record["release_date"]))
     coverage_note = ""
     if source_dates and min(source_dates) > programme_first:
+        gap = f"{programme_first.isoformat()}..{source_min}"
         coverage_note = (
-            f"Earliest row in this file is {source_min}, after the first "
-            f"admissible posting {programme_first.isoformat()}. Postings from "
-            "that date up to this file's start are absent. Backfilling them "
-            "requires a separate corpus generation, not an append."
+            f"Earliest row in this file is {source_min}, after the proxy's "
+            f"first admissible posting {programme_first.isoformat()}. The gap "
+            f"{gap} is absent. Filling the {gap} gap needs a separate corpus "
+            f"generation, not an append onto this file."
         )
+        if operative != record["release_date"]:
+            window_start = cutoff_plus_grace(operative).isoformat()
+            coverage_note += (
+                f" The operative harvest cutoff is {operative} (harvest "
+                f"windows start on {window_start}). {operative} is later than "
+                f"the release-date proxy {record['release_date']}, so it is "
+                f"strictly more conservative and the rows already in the file "
+                f"are not contaminated by the mismatch."
+            )
+        # The harvest window starts on cutoff+grace. The date gate keeps a
+        # posting only when the date is strictly after that day, so the
+        # window-start day is in the file and then dropped.
+        boundary = cutoff_plus_grace(cutoff)
+        if min(source_dates) <= boundary:
+            coverage_note += (
+                f" The date gate keeps postings strictly after "
+                f"{boundary.isoformat()}, so rows dated {source_min} that "
+                f"the harvest wrote are dropped as date."
+            )
 
     provenance = {
         key: record[key]
@@ -329,6 +364,8 @@ def build(
             "revision_policy",
         )
     }
+    provenance["release_date_proxy"] = record["release_date"]
+    provenance["operative_harvest_cutoff"] = operative
 
     card = build_card(
         kept,
@@ -344,9 +381,11 @@ def build(
             "g1c_compliant": g1c_ok,
             "g1c_verdict": g1c_verdict,
             "fulltext_status_counts": dict(sorted(status_counts.items())),
+            "release_date_proxy": record["release_date"],
+            "operative_harvest_cutoff": operative,
             "cutoff_provenance": provenance,
             "cutoff_evidence": record["evidence"],
-            "cutoff_justification": record["justification"],
+            "cutoff_justification": justification,
             "cutoff_compliant": record["compliant"],
             "source_date_min": source_min,
             "source_date_max": source_max,
@@ -360,6 +399,8 @@ def build(
     manifest = {
         "source": source,
         "cutoff": cutoff,
+        "release_date_proxy": card["release_date_proxy"],
+        "operative_harvest_cutoff": card["operative_harvest_cutoff"],
         "cutoff_compliant": card["cutoff_compliant"],
         "cutoff_provenance": card["cutoff_provenance"],
         "cutoff_justification": card["cutoff_justification"],
@@ -395,6 +436,8 @@ def _print_report(result: dict) -> None:
     print("CORPUS BUILD REPORT" + (" (DRY RUN)" if result.get("dry_run") else ""))
     print("=" * 68)
     print(f"recorded cutoff     : {card['recorded_cutoff']}")
+    print(f"release-date proxy  : {card['release_date_proxy']}")
+    print(f"operative harvest   : {card['operative_harvest_cutoff']}")
     print(f"cutoff compliant    : {card['cutoff_compliant']}")
     print(f"cutoff kind         : {card['cutoff_provenance'].get('kind')}")
     print(f"cutoff justification: {card['cutoff_justification']}")

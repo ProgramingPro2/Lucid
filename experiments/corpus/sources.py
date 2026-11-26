@@ -254,9 +254,10 @@ def cutoff_record(cutoff: str) -> dict:
         kind = "upward-revision"
         compliant = True
         justification = (
-            f"Operator date {cutoff[:10]} is later than the release-date proxy "
-            f"{PROGRAMME_CUTOFF}. An upward revision is allowed and discards "
-            "more data. This date is not a model-card cutoff."
+            f"Operator date {cutoff[:10]} is the operative harvest cutoff, later "
+            f"than the release-date proxy {PROGRAMME_CUTOFF}, so it is strictly "
+            f"more conservative and discards more data. This date is not a "
+            f"model-card cutoff."
         )
     else:
         kind = "earlier-than-proxy"
@@ -282,6 +283,29 @@ def cutoff_record(cutoff: str) -> dict:
         "justification": justification,
         "compliant": compliant,
     }
+
+
+# The running harvest of artifacts/corpus/biorxiv_2026.jsonl was opened with
+# this date (scripts/harvest_supervisor.py DEFAULT_CUTOFF and the live
+# --cutoff). It is later than PROGRAMME_CUTOFF, so it is strictly more
+# conservative. Do not retarget that harvest, and do not let a build that
+# is handed the proxy overwrite this value on the card.
+OPERATIVE_HARVEST_CUTOFF = "2025-06-01"
+IN_PROGRESS_HARVEST_NAME = "biorxiv_2026.jsonl"
+
+
+def resolve_operative_harvest_cutoff(
+    supplied: str, docs_jsonl: str | Path | None = None
+) -> str:
+    """The cutoff the harvest was opened with.
+
+    The in-progress file keeps :data:`OPERATIVE_HARVEST_CUTOFF` even when the
+    date gate is handed the release-date proxy. Any other build records the
+    cutoff it was given. This is the harvest cutoff, not a model-card value.
+    """
+    if docs_jsonl is not None and Path(docs_jsonl).name == IN_PROGRESS_HARVEST_NAME:
+        return OPERATIVE_HARVEST_CUTOFF
+    return str(supplied)[:10]
 
 
 # --------------------------------------------------------------------------
