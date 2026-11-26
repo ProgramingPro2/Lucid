@@ -257,13 +257,36 @@ def harvest(
 
 
 def load_documents(path: str | Path) -> list[Document]:
-    """Read a harvest JSONL back into ``Document`` objects."""
+    """Read a harvest JSONL back into ``Document`` objects.
+
+    A malformed final line is skipped. A signal can cut one large flush
+    between buffer chunks and leave a truncated tail with no newline; the
+    next resume already ignores that tail, and a build has to as well. A
+    malformed line anywhere earlier is corruption and still raises
+    ``JSONDecodeError``. Blank lines are ignored, as before.
+    """
     docs: list[Document] = []
+
+    def take(line: str, *, final: bool) -> None:
+        stripped = line.strip()
+        if not stripped:
+            return
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            if final:
+                return
+            raise
+        docs.append(Document(**payload))
+
     with Path(path).open() as fh:
+        previous: str | None = None
         for line in fh:
-            line = line.strip()
-            if line:
-                docs.append(Document(**json.loads(line)))
+            if previous is not None:
+                take(previous, final=False)
+            previous = line
+        if previous is not None:
+            take(previous, final=True)
     return docs
 
 

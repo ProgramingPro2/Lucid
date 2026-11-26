@@ -35,10 +35,10 @@ script does not modify it):
   calls. SIGTERM can land between those calls and leave a truncated final
   line with no newline. The next append would glue onto that partial line.
   Waiting for the child's own exit, and not following SIGTERM with SIGKILL,
-  is the whole of what the supervisor can do about that. The build must
-  tolerate a truncated final line. ``_load_done`` already skips a line that
-  is not valid JSON, so resume continues; ``load_documents`` raises
-  ``JSONDecodeError`` on the same line.
+  is the whole of what the supervisor can do about that. ``load_documents``
+  skips a malformed final line and still raises ``JSONDecodeError`` on a
+  malformed line earlier in the file. ``_load_done`` skips any line that is
+  not valid JSON, so resume continues.
 - The cursor sidecar is written to ``*.cursors.json.tmp`` and moved into
   place with ``Path.replace`` (atomic rename on the same filesystem). A kill
   during the temp write leaves the previous cursor file intact. The cursor

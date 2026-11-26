@@ -905,3 +905,49 @@ def test_a_429_that_clears_does_not_abort(tmp_path, monkeypatch):
     assert max(sleeps) >= 59.0
     assert counts["fulltext_ok"] == 1
     assert counts["written"] == 2
+
+
+def _record(doc_id: str) -> str:
+    return json.dumps(
+        {
+            "doc_id": doc_id,
+            "source": "biorxiv",
+            "title": "t",
+            "text": "body",
+            "sections": {"introduction": "body"},
+            "license": "cc-by",
+            "date": "2025-07-01",
+            "meta": {},
+        }
+    )
+
+
+def test_load_documents_skips_only_a_malformed_final_line(tmp_path):
+    """A truncated tail must not fail a build. An earlier bad line must."""
+    path = tmp_path / "docs.jsonl"
+    first = _record("biorxiv:10.1/a")
+    second = _record("biorxiv:10.1/b")
+    path.write_bytes(first.encode() + b"\n" + second.encode() + b"\n" + b'{"doc_id": "torn')
+    docs = harvest_mod.load_documents(path)
+    assert [d.doc_id for d in docs] == ["biorxiv:10.1/a", "biorxiv:10.1/b"]
+
+    # The same truncation with its own newline is still the final line.
+    terminated = tmp_path / "terminated.jsonl"
+    terminated.write_text(first + "\n" + '{"doc_id": "torn"\n', encoding="utf-8")
+    docs = harvest_mod.load_documents(terminated)
+    assert [d.doc_id for d in docs] == ["biorxiv:10.1/a"]
+
+    interior = tmp_path / "interior.jsonl"
+    interior.write_text('{"doc_id": "torn"\n' + second + "\n", encoding="utf-8")
+    with pytest.raises(json.JSONDecodeError):
+        harvest_mod.load_documents(interior)
+
+    both = tmp_path / "both.jsonl"
+    both.write_bytes(b'{"broken"\n' + second.encode() + b"\n" + b'{"also": "torn')
+    with pytest.raises(json.JSONDecodeError):
+        harvest_mod.load_documents(both)
+
+    clean = tmp_path / "clean.jsonl"
+    clean.write_text(first + "\n\n" + second + "\n", encoding="utf-8")
+    docs = harvest_mod.load_documents(clean)
+    assert [d.doc_id for d in docs] == ["biorxiv:10.1/a", "biorxiv:10.1/b"]
