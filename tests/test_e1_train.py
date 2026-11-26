@@ -455,6 +455,41 @@ def test_determinism_mode_repeats_eval_on_cuda(tmp_path):
     _repeat_eval("cuda", "bfloat16", tmp_path)
 
 
+def test_step_trace_matches_across_two_cpu_runs(tmp_path):
+    """The per-step checksum is a pure record of the loop, and it repeats."""
+
+    def once(tag: str) -> dict:
+        cfg = _cfg(
+            arm="D",
+            seed=0,
+            tokens=256,
+            context=16,
+            batch_size=2,
+            grad_accum=2,
+            eval_items=2,
+            eval_prefix=8,
+            eval_target=4,
+            device="cpu",
+            dtype="float32",
+            log_every=10,
+            checkpoint_dir=str(tmp_path / tag),
+            deterministic=True,
+            step_trace=True,
+        )
+        return run(cfg, tiny=True)["train"]["step_trace"]
+
+    first = once("a")
+    second = once("b")
+    assert first["n_steps"] == len(first["loss_sum_f64_hex"]) == len(first["batch_u64_hex"])
+    assert first["n_steps"] > 1
+    assert first["init_param_xor"] == second["init_param_xor"]
+    assert first["loss_sum_f64_hex"] == second["loss_sum_f64_hex"]
+    assert first["loss_xor"] == second["loss_xor"]
+    assert first["batch_u64_hex"] == second["batch_u64_hex"]
+    assert first["batch_xor"] == second["batch_xor"]
+    assert first["tainted_steps"] == second["tainted_steps"]
+
+
 def _load(cfg: TrainConfig):
     import numpy as np
 

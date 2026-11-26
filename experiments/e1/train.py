@@ -116,8 +116,10 @@ import random
 # docstring: a process that already ran a CUDA GEMM will not pick it up.
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
+import hashlib
 import json
 import math
+import struct
 import sys
 import time
 from dataclasses import asdict, dataclass, field
@@ -232,6 +234,11 @@ class TrainConfig:
     # Pins seeds and kernel flags. See the module docstring for what was
     # actually measured, and for what this flag cannot make deterministic.
     deterministic: bool = True
+    # Read-only per-step checksums. Off by default so a confirmatory run does
+    # not carry a diagnostic list. When on, the loop records the bit pattern
+    # of the loss sum it already computed and a checksum of the token ids it
+    # already drew. Neither read changes the update.
+    step_trace: bool = False
 
     def __post_init__(self) -> None:
         if self.tokens is None:
@@ -588,6 +595,35 @@ def load_corpus(
 # --------------------------------------------------------------------------
 
 
+def _u64_from_bytes(payload: bytes) -> int:
+    """First 8 bytes of SHA-256, as an int. A checksum, not an identity proof."""
+    digest = hashlib.sha256(payload).digest()
+    return int.from_bytes(digest[:8], "little")
+
+
+def _f64_bits(value: float) -> int:
+    """IEEE-754 binary64 bit pattern of a loss the loop already converted.
+
+    ``float(lm.detach())`` is the conversion. This does not round again.
+    """
+    return struct.unpack("<Q", struct.pack("<d", float(value)))[0]
+
+
+def _trainable_param_xor(model: torch.nn.Module) -> str:
+    """Order-independent checksum of trainable parameter bytes.
+
+    Read-only, so it cannot move an initialisation. A later ``torch.equal``
+    on a saved checkpoint is the weight comparison this does not replace.
+    """
+    xor = 0
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        raw = param.detach().contiguous().view(torch.uint8).cpu().numpy().tobytes()
+        xor ^= _u64_from_bytes(name.encode("utf-8") + b"\0" + raw)
+    return f"{xor:016x}"
+
+
 def _batch_tokens(cfg: TrainConfig) -> int:
     return cfg.batch_size * cfg.grad_accum * cfg.context
 
@@ -702,6 +738,13 @@ def train(
     started = time.time()
     model.train()
     nan_counter = NanCounter()
+    trace_loss_hex: list[str] = []
+    trace_batch_hex: list[str] = []
+    trace_tainted: list[int] = []
+    trace_loss_xor = 0
+    trace_batch_xor = 0
+    # Before any update. A mismatch here is init order, not a later kernel.
+    trace_init = _trainable_param_xor(model) if cfg.step_trace else None
 
     global_step = 0
     for step in range(n_steps):
@@ -712,11 +755,16 @@ def train(
         step_stats: dict[str, float] | None = None
         micro_done = 0
         tainted = False
+        step_batch_xor = 0
         will_log = (step + 1) % cfg.log_every == 0 or (step + 1) == n_steps
         for micro in range(cfg.grad_accum):
             x_np, _ = train_corpus.train_batch(
                 rng, cfg.batch_size, cfg.context
             )
+            if cfg.step_trace:
+                step_batch_xor ^= _u64_from_bytes(
+                    np.ascontiguousarray(x_np).tobytes()
+                )
             input_ids = torch.as_tensor(
                 x_np, dtype=torch.long, device=cfg.device
             )
@@ -774,6 +822,19 @@ def train(
                 step_stats = representation_stats(
                     model.student_states(out.hidden_states)
                 )
+
+        if cfg.step_trace:
+            # ``step_lm`` is the sum of the Python floats already taken from
+            # each microbatch loss. A tainted step still records what was
+            # drawn and what was accumulated, so the first diverging index
+            # lines up across two processes.
+            bits = _f64_bits(step_lm)
+            trace_loss_xor ^= bits
+            trace_loss_hex.append(f"{bits:016x}")
+            trace_batch_xor ^= step_batch_xor
+            trace_batch_hex.append(f"{step_batch_xor:016x}")
+            if tainted:
+                trace_tainted.append(step + 1)
 
         if tainted:
             global_step += 1
@@ -861,7 +922,7 @@ def train(
         history[-1]["exceeds_extension_threshold"] = extension[
             "exceeds_extension_threshold"
         ]
-    return {
+    result = {
         "steps": global_step,
         "tokens_seen": tokens_seen,
         "lr": lr,
@@ -873,6 +934,17 @@ def train(
         "final_checkpoint": str(final_checkpoint),
         "extension": extension,
     }
+    if cfg.step_trace:
+        result["step_trace"] = {
+            "n_steps": len(trace_loss_hex),
+            "init_param_xor": trace_init,
+            "loss_sum_f64_hex": trace_loss_hex,
+            "loss_xor": f"{trace_loss_xor:016x}",
+            "batch_u64_hex": trace_batch_hex,
+            "batch_xor": f"{trace_batch_xor:016x}",
+            "tainted_steps": trace_tainted,
+        }
+    return result
 
 
 # --------------------------------------------------------------------------
@@ -1307,6 +1379,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=True,
         help="seed process RNGs and request deterministic kernels (default)",
     )
+    p.add_argument(
+        "--step-trace",
+        action="store_true",
+        help="record per-step loss bit patterns and batch checksums",
+    )
     p.add_argument("--out", default=None)
     return p
 
@@ -1343,6 +1420,7 @@ def main(argv: list[str] | None = None) -> int:
         checkpoint_every=args.checkpoint_every,
         checkpoint_dir=args.checkpoint_dir,
         deterministic=args.deterministic,
+        step_trace=args.step_trace,
     )
 
     print(
