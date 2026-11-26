@@ -50,6 +50,12 @@ _LICENSE_ALIASES = {
     "cc0 1.0": "cc0",
     "cc0 1": "cc0",
     "cc-0": "cc0",
+    # Live details payloads use ``cc0_ng``. The JATS license href on those
+    # papers is creativecommons.org/publicdomain/zero/1.0/ and the statement
+    # says the preprint was placed in the Public Domain. Underscores are
+    # turned into spaces before this lookup. ``cc_no`` is not an alias: the
+    # JATS for that token says all rights reserved, so it stays "unknown".
+    "cc0 ng": "cc0",
     "public domain": "public-domain",
     "public-domain": "public-domain",
     "publicdomain": "public-domain",
@@ -193,6 +199,81 @@ def _xml_text(node, *, skip_titles: bool = True) -> str:
     return re.sub(r"\s+", " ", "".join(parts)).strip()
 
 
+def backoff_seconds(attempt: int, *, base: float = 2.0, cap: float = 60.0) -> float:
+    """Bounded exponential backoff with jitter.
+
+    ``attempt`` is 0-based. The sleep is drawn from the upper half of the
+    exponential ceiling so a retry waits, but never longer than ``cap``.
+    A non-positive cap disables the wait (tests pass ``cooldown=0``).
+    """
+    import random
+
+    if cap <= 0:
+        return 0.0
+    ceiling = min(cap, base * (2**attempt))
+    if ceiling <= 0:
+        return 0.0
+    return random.uniform(ceiling / 2.0, ceiling)
+
+
+def _error_snippet(exc: BaseException) -> str:
+    """Short, single-line body or message from a failed request."""
+    data: bytes | str | None = None
+    read = getattr(exc, "read", None)
+    if callable(read):
+        try:
+            data = read()
+        except Exception:  # noqa: BLE001 - a missing body must not hide the status
+            data = None
+    if isinstance(data, bytes):
+        text = data[:240].decode("utf-8", errors="replace")
+    elif isinstance(data, str):
+        text = data[:240]
+    else:
+        text = str(exc)
+    return " ".join(text.split())[:240]
+
+
+_BLOCK_MARKERS = (
+    "access denied",
+    "request blocked",
+    "captcha",
+    "cloudflare",
+    "attention required",
+)
+
+
+def _looks_like_block(snippet: str) -> bool:
+    text = snippet.lower()
+    return any(marker in text for marker in _BLOCK_MARKERS)
+
+
+class HostRefused(RuntimeError):
+    """The host refused this client. Retrying extends the block."""
+
+    def __init__(self, url: str, status: int | None, detail: str) -> None:
+        self.url = url
+        self.status = status
+        self.detail = detail
+        super().__init__(f"host refused {url} (status={status}): {detail}")
+
+
+class TransientRequestError(RuntimeError):
+    """A retryable HTTP failure (429 or 5xx) exhausted its attempts."""
+
+    def __init__(self, url: str, status: int | None, detail: str) -> None:
+        self.url = url
+        self.status = status
+        self.detail = detail
+        super().__init__(
+            f"transient failure after retries for {url} (status={status}): {detail}"
+        )
+
+
+def _failure_label(exc: BaseException) -> str:
+    return " ".join(f"{type(exc).__name__}: {exc}".split())[:180]
+
+
 def parse_jats(xml_bytes: bytes) -> tuple[str, dict[str, str]]:
     """Extract running prose and section strata from a JATS article.
 
@@ -253,13 +334,13 @@ class BioRxivClient:
     """
 
     BASE = "https://api.biorxiv.org/details"
-    UA = "LucidResearch/0.1 (academic corpus build; contact: local)"
+    UA = "LucidResearch/0.1 (academic corpus build; mailto:research@talontodo.com)"
 
     def __init__(
         self,
         server: str = "biorxiv",
         timeout: float = 45.0,
-        delay: float = 1.0,
+        delay: float = 3.0,
         retries: int = 6,
         fulltext: bool = False,
     ) -> None:
@@ -274,6 +355,9 @@ class BioRxivClient:
         # A 429 is a host-level request to stop, not a per-URL hiccup. Once one
         # arrives, every subsequent request waits out this cooldown.
         self._cooldown_until = 0.0
+        # Set by the harvester so a retried window continues mid-interval.
+        self.start_cursor = 0
+        self.on_page_complete = None
 
     def _get(self, url: str, *, as_json: bool = False):
         import time
@@ -281,6 +365,8 @@ class BioRxivClient:
         import urllib.request
 
         last: Exception | None = None
+        last_status: int | None = None
+        saw_http_transient = False
         for attempt in range(self.retries):
             now = time.monotonic()
             wait = max(
@@ -300,24 +386,54 @@ class BioRxivClient:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:  # noqa: S310
                     self._last_request = time.monotonic()
                     payload = resp.read()
-                return json.loads(payload.decode("utf-8")) if as_json else payload
+                    status = getattr(resp, "status", 200)
+                if as_json:
+                    try:
+                        return json.loads(payload.decode("utf-8"))
+                    except json.JSONDecodeError as exc:
+                        snippet = payload[:240].decode("utf-8", errors="replace")
+                        if _looks_like_block(snippet):
+                            raise HostRefused(url, status, snippet) from exc
+                        raise TransientRequestError(
+                            url, status, f"not json: {snippet}"
+                        ) from exc
+                return payload
+            except (HostRefused, TransientRequestError):
+                raise
             except urllib.error.HTTPError as exc:
                 last = exc
+                last_status = exc.code
+                snippet = _error_snippet(exc)
+                if exc.code in {401, 403, 451}:
+                    raise HostRefused(url, exc.code, snippet) from exc
                 if exc.code == 429:
+                    saw_http_transient = True
                     header = exc.headers.get("Retry-After") if exc.headers else None
                     try:
                         retry_after = float(header) if header else 0.0
-                    except ValueError:
+                    except (TypeError, ValueError):
                         retry_after = 0.0
                     # The host said stop. Back off for at least a minute even if
                     # it gave no header; retrying immediately extends the ban.
                     self._cooldown_until = time.monotonic() + max(retry_after, 60.0)
-                elif exc.code not in {500, 502, 503, 504}:
+                elif exc.code in {500, 502, 503, 504}:
+                    if _looks_like_block(snippet):
+                        raise HostRefused(url, exc.code, snippet) from exc
+                    saw_http_transient = True
+                else:
+                    # A per-paper 404 must not be treated as a host-wide block.
                     raise
             except (urllib.error.URLError, TimeoutError) as exc:
                 last = exc
-            time.sleep(min(300.0, 10.0 * 2**attempt))
-        raise RuntimeError(f"request failed after {self.retries} attempts: {url}") from last
+                last_status = None
+            if attempt + 1 < self.retries:
+                time.sleep(backoff_seconds(attempt, base=2.0, cap=30.0))
+        detail = _error_snippet(last) if last is not None else "unknown"
+        if saw_http_transient:
+            raise TransientRequestError(url, last_status, detail) from last
+        # Every attempt failed before an HTTP status (reset, timeout, refused).
+        # That is a block, not a 429: do not hand it back as a retryable error.
+        raise HostRefused(url, last_status, detail) from last
 
     def _metadata(self, row: dict) -> Document:
         text = row.get("abstract") or ""
@@ -333,6 +449,7 @@ class BioRxivClient:
                 "doi": row.get("doi"),
                 "version": row.get("version"),
                 "jatsxml": row.get("jatsxml"),
+                "license_raw": row.get("license"),
                 "fulltext": "abstract_only",
             },
         )
@@ -351,8 +468,12 @@ class BioRxivClient:
         try:
             xml_bytes = self._get(url)
             text, sections = parse_jats(xml_bytes)
+        except HostRefused:
+            # A refusal is host-wide. Recording it as a per-paper miss would
+            # keep the harvest hammering the same block.
+            raise
         except Exception as exc:  # noqa: BLE001 - recorded, not swallowed
-            doc.meta["fulltext"] = f"error:{type(exc).__name__}"
+            doc.meta["fulltext"] = f"error:{_failure_label(exc)}"
             return doc
         if not text.strip():
             doc.meta["fulltext"] = "empty"
@@ -370,7 +491,7 @@ class BioRxivClient:
         whole window before writing means a failure loses an hour of work. The
         harvester consumes this generator and commits each document immediately.
         """
-        cursor = 0
+        cursor = int(self.start_cursor or 0)
         while True:
             url = f"{self.BASE}/{self.server}/{since_date}/{until_date}/{cursor}"
             payload = self._get(url, as_json=True)
@@ -380,6 +501,13 @@ class BioRxivClient:
             for row in rows:
                 yield self._metadata(row)
             cursor += len(rows)
+            self.start_cursor = cursor
+            # Runs only once the consumer has pulled every row of this page,
+            # and before the next page is requested. A failure on the next
+            # page therefore resumes here rather than at cursor 0.
+            hook = self.on_page_complete
+            if hook is not None:
+                hook(cursor)
 
     def fetch(
         self, since_date: str, until_date: str, max_docs: int = 1000

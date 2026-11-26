@@ -10,8 +10,12 @@ import pytest
 
 from experiments.corpus import harvest as harvest_mod
 from experiments.corpus.sources import (
+    LICENSE_ALLOWLIST,
     BioRxivClient,
     Document,
+    HostRefused,
+    TransientRequestError,
+    backoff_seconds,
     normalise_license,
     parse_jats,
 )
@@ -42,7 +46,18 @@ def test_normalise_biorxiv_underscore_licences():
     assert normalise_license("cc_by_nc_nd") == "cc-by-nc-nd-4.0"
     assert normalise_license("cc_by_nd") == "cc-by-nd-4.0"
     assert normalise_license("cc0") == "cc0"
+    # ``cc_no`` is the token whose JATS says all rights reserved. It must not
+    # be inferred into the allowlist.
     assert normalise_license("cc_no") == "unknown"
+    assert normalise_license("cc_no") not in LICENSE_ALLOWLIST
+
+
+def test_normalise_observed_cc0_ng_is_public_domain():
+    # Live details rows use ``cc0_ng``. The JATS license href on those papers
+    # is https://creativecommons.org/publicdomain/zero/1.0/ and the statement
+    # says the preprint was placed in the Public Domain.
+    assert normalise_license("cc0_ng") == "cc0"
+    assert normalise_license("cc0_ng") in LICENSE_ALLOWLIST
 
 
 def test_parse_jats_extracts_strata_and_drops_backmatter():
@@ -244,6 +259,350 @@ def test_harvest_retries_a_rate_limited_window(tmp_path, monkeypatch):
     assert Flaky.calls >= 2
     assert counts["written"] == 2
     assert len(out.read_text().splitlines()) == 2
+
+
+def _one_window() -> tuple[str, str]:
+    """A since/until pair that the grace rule collapses to a single window."""
+    return "2026-01-01", "2026-02-02"
+
+
+def test_backoff_is_bounded_and_jittered(monkeypatch):
+    import random
+
+    draws: list[tuple[float, float]] = []
+
+    def uniform(low, high):
+        draws.append((low, high))
+        return (low + high) / 2
+
+    monkeypatch.setattr(random, "uniform", uniform)
+    assert backoff_seconds(0, base=2.0, cap=60.0) == 1.5
+    assert draws[-1] == (1.0, 2.0)
+    assert backoff_seconds(10, base=2.0, cap=60.0) == 45.0
+    assert draws[-1] == (30.0, 60.0)
+    assert backoff_seconds(3, base=5.0, cap=0.0) == 0.0
+
+
+def test_user_agent_names_a_real_contact():
+    assert "mailto:research@talontodo.com" in BioRxivClient.UA
+    assert "contact: local" not in BioRxivClient.UA
+
+
+def test_get_does_not_retry_a_host_refusal(monkeypatch):
+    import io
+    import time
+    import urllib.error
+
+    calls: list[str] = []
+
+    def fake_urlopen(req, timeout):
+        calls.append(req.get_header("User-agent"))
+        raise urllib.error.HTTPError(
+            req.full_url, 403, "Forbidden", {}, io.BytesIO(b"Request blocked")
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    client = BioRxivClient(delay=0.0, retries=4)
+    with pytest.raises(HostRefused) as exc_info:
+        client._get("https://example.test/x", as_json=True)
+    assert len(calls) == 1
+    assert "mailto:research@talontodo.com" in calls[0]
+    message = str(exc_info.value)
+    assert "403" in message
+    assert "blocked" in message.lower()
+
+
+def test_get_retries_a_transient_503_and_reports_the_status(monkeypatch):
+    import io
+    import time
+    import urllib.error
+
+    calls: list[int] = []
+
+    def fake_urlopen(req, timeout):
+        calls.append(1)
+        raise urllib.error.HTTPError(
+            req.full_url,
+            503,
+            "Service Unavailable",
+            {},
+            io.BytesIO(b"unavailable"),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    client = BioRxivClient(delay=0.0, retries=3)
+    with pytest.raises(TransientRequestError) as exc_info:
+        client._get("https://example.test/x", as_json=True)
+    assert len(calls) == 3
+    assert exc_info.value.status == 503
+    assert "503" in str(exc_info.value)
+    assert exc_info.value.__cause__ is not None
+
+
+def test_repeated_connection_failures_are_a_refusal(monkeypatch):
+    import time
+    import urllib.error
+
+    calls: list[int] = []
+
+    def fake_urlopen(req, timeout):
+        calls.append(1)
+        raise urllib.error.URLError("connection reset by peer")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    client = BioRxivClient(delay=0.0, retries=3)
+    with pytest.raises(HostRefused) as exc_info:
+        client._get("https://example.test/x")
+    assert len(calls) == 3
+    assert "connection reset" in str(exc_info.value)
+
+
+def test_get_does_not_treat_a_404_as_a_host_block(monkeypatch):
+    import io
+    import time
+    import urllib.error
+
+    calls: list[int] = []
+
+    def fake_urlopen(req, timeout):
+        calls.append(1)
+        raise urllib.error.HTTPError(
+            req.full_url, 404, "Not Found", {}, io.BytesIO(b"missing")
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    client = BioRxivClient(delay=0.0, retries=4)
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        client._get("https://example.test/missing.xml")
+    assert len(calls) == 1
+    assert exc_info.value.code == 404
+
+
+def test_fetch_fulltext_records_the_error_and_propagates_refusal():
+    class Failing(BioRxivClient):
+        def _get(self, url, *, as_json=False):
+            raise TransientRequestError(url, 503, "upstream unavailable")
+
+    doc = Document(
+        doc_id="biorxiv:err",
+        source="biorxiv",
+        title="t",
+        text="abstract",
+        sections={"abstract": "abstract"},
+        license="cc-by",
+        date="2026-09-01",
+        meta={"jatsxml": "https://example.test/a.xml", "fulltext": "abstract_only"},
+    )
+    out = Failing(delay=0.0).fetch_fulltext(doc)
+    assert out.meta["fulltext"].startswith("error:")
+    assert "503" in out.meta["fulltext"]
+    assert out.meta["fulltext"] != "abstract_only"
+
+    class Refusing(BioRxivClient):
+        def _get(self, url, *, as_json=False):
+            raise HostRefused(url, 403, "Request blocked")
+
+    with pytest.raises(HostRefused):
+        Refusing(delay=0.0).fetch_fulltext(doc)
+
+
+def test_harvest_resumes_a_window_from_the_next_page(tmp_path, monkeypatch):
+    """A failure on page 2 must not re-fetch pages 0 and 1, or drop a document."""
+    state = {"failed": False, "urls": []}
+
+    class Client(BioRxivClient):
+        def __init__(self, **kwargs):
+            kwargs["delay"] = 0.0
+            super().__init__(**kwargs)
+
+        def _get(self, url, *, as_json=False):
+            if not as_json:
+                return JATS
+            state["urls"].append(url)
+            cursor = int(url.rsplit("/", 1)[-1])
+            if cursor == 4 and not state["failed"]:
+                state["failed"] = True
+                raise TransientRequestError(url, 503, "simulated upstream 503")
+            if cursor >= 6:
+                return {"collection": []}
+            rows = [
+                {
+                    "doi": f"10.1/{cursor + i}",
+                    "date": "2026-02-01",
+                    "license": "cc_by",
+                    "title": "t",
+                    "abstract": "a",
+                    "jatsxml": f"https://example.test/{cursor + i}.xml",
+                }
+                for i in range(2)
+            ]
+            return {"collection": rows}
+
+    monkeypatch.setattr(harvest_mod, "BioRxivClient", Client)
+    out = tmp_path / "harvest.jsonl"
+    since, until = _one_window()
+    counts = harvest_mod.harvest(
+        server="biorxiv",
+        since=since,
+        until=until,
+        out=out,
+        max_docs=20,
+        delay=0.0,
+        cooldown=0.0,
+        window_retries=2,
+    )
+    cursors = [int(url.rsplit("/", 1)[-1]) for url in state["urls"]]
+    assert cursors == [0, 2, 4, 4, 6], cursors
+    assert counts["written"] == 6
+    assert counts["fulltext_ok"] == 6
+    assert "aborted" not in counts
+    lines = [json.loads(line) for line in out.read_text().splitlines()]
+    ids = [row["doc_id"] for row in lines]
+    assert len(ids) == len(set(ids)) == 6
+    assert set(ids) == {f"biorxiv:10.1/{i}" for i in range(6)}
+    saved = json.loads(harvest_mod.cursor_path_for(out).read_text())
+    assert saved
+    assert max(saved.values()) >= 4
+
+
+def test_harvest_stops_on_host_refused_without_burning_retries(tmp_path, monkeypatch):
+    calls = {"n": 0}
+    sleeps: list[float] = []
+    monkeypatch.setattr(harvest_mod.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    class Client(BioRxivClient):
+        def __init__(self, **kwargs):
+            kwargs["delay"] = 0.0
+            super().__init__(**kwargs)
+
+        def iter_metadata(self, since, until):
+            calls["n"] += 1
+            raise HostRefused(
+                "https://api.biorxiv.org/details/biorxiv/x", 403, "Request blocked"
+            )
+
+    monkeypatch.setattr(harvest_mod, "BioRxivClient", Client)
+    # Two windows would be walked if a refusal were retried like a transient error.
+    counts = harvest_mod.harvest(
+        server="biorxiv",
+        since="2026-01-01",
+        until="2026-02-15",
+        out=tmp_path / "harvest.jsonl",
+        max_docs=50,
+        delay=0.0,
+        cooldown=120.0,
+        window_retries=3,
+    )
+    assert calls["n"] == 1
+    assert counts["aborted"] == "host_refused"
+    assert counts["written"] == 0
+    assert sleeps == []
+
+
+def test_harvest_stops_when_a_window_makes_no_progress(tmp_path, monkeypatch):
+    calls = {"n": 0}
+
+    class Client(BioRxivClient):
+        def __init__(self, **kwargs):
+            kwargs["delay"] = 0.0
+            super().__init__(**kwargs)
+
+        def iter_metadata(self, since, until):
+            calls["n"] += 1
+            raise TransientRequestError(
+                "https://api.biorxiv.org/details/biorxiv/x", 503, "unavailable"
+            )
+
+    monkeypatch.setattr(harvest_mod, "BioRxivClient", Client)
+    counts = harvest_mod.harvest(
+        server="biorxiv",
+        since="2026-01-01",
+        until="2026-02-15",
+        out=tmp_path / "harvest.jsonl",
+        max_docs=50,
+        delay=0.0,
+        cooldown=0.0,
+        window_retries=2,
+    )
+    assert calls["n"] == 2
+    assert counts["aborted"] == "no_progress"
+    assert counts["written"] == 0
+
+
+def test_harvest_counts_fulltext_failures_separately(tmp_path, monkeypatch):
+    docs = [
+        Document(
+            doc_id="biorxiv:allowed-error",
+            source="biorxiv",
+            title="t",
+            text="abstract",
+            sections={"abstract": "abstract"},
+            license="cc-by",
+            date="2026-02-01",
+            meta={"jatsxml": "https://example.test/a.xml", "fulltext": "abstract_only"},
+        ),
+        Document(
+            doc_id="biorxiv:excluded",
+            source="biorxiv",
+            title="t",
+            text="abstract",
+            sections={"abstract": "abstract"},
+            license="cc-by-nc-nd-4.0",
+            date="2026-02-01",
+            meta={"jatsxml": "https://example.test/b.xml", "fulltext": "abstract_only"},
+        ),
+        Document(
+            doc_id="biorxiv:no-link",
+            source="biorxiv",
+            title="t",
+            text="abstract",
+            sections={"abstract": "abstract"},
+            license="cc-by",
+            date="2026-02-01",
+            meta={"jatsxml": None, "fulltext": "abstract_only"},
+        ),
+    ]
+
+    class Client(BioRxivClient):
+        def __init__(self, **kwargs):
+            kwargs["delay"] = 0.0
+            super().__init__(**kwargs)
+
+        def iter_metadata(self, since, until):
+            yield from docs
+
+        def fetch_fulltext(self, doc):
+            doc.meta["fulltext"] = "error:TimeoutError:timed out"
+            return doc
+
+    monkeypatch.setattr(harvest_mod, "BioRxivClient", Client)
+    since, until = _one_window()
+    counts = harvest_mod.harvest(
+        server="biorxiv",
+        since=since,
+        until=until,
+        out=tmp_path / "harvest.jsonl",
+        max_docs=10,
+        delay=0.0,
+        cooldown=0.0,
+    )
+    assert counts["fulltext_error"] == 1
+    assert counts["fulltext_error_reasons"] == {
+        "error:TimeoutError:timed out": 1
+    }
+    assert counts["licence_excluded"] == 1
+    assert counts["no_jats_link"] == 1
+    assert counts["abstract_only"] == 0
+    assert counts["fulltext_ok"] == 0
+    lines = [json.loads(line) for line in (tmp_path / "harvest.jsonl").read_text().splitlines()]
+    by_id = {row["doc_id"]: row["meta"]["fulltext"] for row in lines}
+    assert by_id["biorxiv:allowed-error"].startswith("error:")
+    assert by_id["biorxiv:excluded"] == "licence_excluded"
+    assert by_id["biorxiv:no-link"] == "no_jats_link"
 
 
 def test_build_from_jsonl_requires_fulltext(tmp_path):
