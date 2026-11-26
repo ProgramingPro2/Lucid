@@ -62,21 +62,22 @@ Four cells at *n* = 32 (pilot-set, floor 24, cap 64), shared-trunk design.
 | ID pattern | Count | Unit | Params trained | Tokens/run |
 |---|---|---|---|---|
 | `e1/trunk/s*` | 32 | run | LoRA only | 30M |
-| `e1/A/s*` | 32 | run | block | 10M |
-| `e1/B/s*` | 32 | run | block (loss weight 0) | 10M |
-| `e1/Ap/s*` | 32 | run | head | 10M |
-| `e1/Bp/s*` | 32 | run | head (loss weight 0) | 10M |
-| `e1/E/s*` | 12 | run | block, permuted targets | 10M |
+| `e1/A/s*` | 32 | run | block | 30M |
+| `e1/B/s*` | 32 | run | block (loss weight 0) | 30M |
+| `e1/Ap/s*` | 32 | run | head | 30M |
+| `e1/Bp/s*` | 32 | run | head (loss weight 0) | 30M |
+| `e1/E/s*` | 12 | run | block, permuted targets | 30M |
 | `e1/D/s*` | 6 | run | none (vehicle) | 30M |
 | `e1/N/s*` | 3 | run | none (frozen random block) | — |
 | `e1/PChi/s*`, `e1/PClo/s*` | 3 + 3 | run | LoRA, 2M tokens | 2M |
 | `e1/*/s*.joint` | 8 × 4 | run | trunk + block jointly | 30M |
-| `e1/A/s*.dose*` | 48 | run | block | 10M |
+| `e1/A/s*.dose*` | 48 | run | block | 30M |
 
-**Total E1:** 219 training units ≈ **127 GPU-hours** with the shared-trunk saving;
-≈ 190 h without it. G6 adds 48 runs (+50 h, conditional). These are revised
-against measured training throughput of 4,029 tok/s (bf16, ctx 512, micro-batch 4)
-— see `docs/PROTOCOL.md` §11.
+**Total E1:** 219 training units. Every confirmatory training run is 30M tokens
+(`experiments.e1.arms.TOKENS_PER_RUN`, `docs/PROTOCOL.md` §5.6), including the
+dose rows. The GPU-hour totals in §7 and in PROTOCOL §11 were estimated under
+an earlier mix of 10M and 30M and are not re-derived here. Throughput the
+estimates used: 4,029 tok/s (bf16, ctx 512, micro-batch 4).
 
 **Analysis.** Per-seed paired difference A − B, then mean across seeds. A′ − B′ the
 same. The joint-confirmation arm is analysed separately and never pooled with the

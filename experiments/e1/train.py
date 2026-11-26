@@ -53,8 +53,19 @@ if str(_REPO_ROOT) not in sys.path:
 from experiments.e1.arms import by_name, build_head  # noqa: E402
 from experiments.e1.block import JEPABlock  # noqa: E402
 from experiments.e1.data import PackedCorpus, target_labels  # noqa: E402
-from experiments.e1.objective import combined_loss, context_gain  # noqa: E402
-from experiments.protocol.seeds import spawn_key  # noqa: E402
+from experiments.e1.objective import (  # noqa: E402
+    combined_loss,
+    context_gain,
+    representation_stats,
+)
+from experiments.protocol.manifest import (  # noqa: E402
+    RunManifest,
+    capture_git_commit,
+    hash_config,
+    spawn_keys_for_seed,
+)
+from experiments.protocol.qualify import NanCounter, microbatch_nonfinite  # noqa: E402
+from experiments.protocol.seeds import spawn_key, token_stream_sha256  # noqa: E402
 
 # Arm -> (block, jepa, head, target_mode). ``by_name`` owns the protocol table;
 # this map only says how each role is wired.
@@ -109,6 +120,16 @@ class TrainConfig:
     eval_seed: int = 20260602
     max_docs: int | None = None
     max_tokens: int | None = None
+    cache: bool = True
+    cache_dir: str = "artifacts/e1/cache"
+    # Held-out dev fraction of the *full* corpus. The sealed test split is
+    # taken first, at ``test_fraction``, and is not resized to make room.
+    dev_fraction: float = 0.05
+    # docs/EXPERIMENTS.md §9: checkpoint every 500 steps, keep all of them,
+    # and always keep a final checkpoint. There is no best-checkpoint
+    # selection; choosing one by its score is optional stopping.
+    checkpoint_every: int = 500
+    checkpoint_dir: str = "artifacts/e1/checkpoints"
 
 
 # --------------------------------------------------------------------------
@@ -171,7 +192,12 @@ class E1Model(torch.nn.Module):
         hidden = output[0] if isinstance(output, tuple) else output
         if self.block is not None and not self._teacher_mode:
             delta = self.block(hidden)
-            if not self.training:
+            # The washout diagnostic is the block's contribution on a *clean*
+            # forward. ``evaluate`` then ablates the block and forwards again;
+            # writing stats on that second pass stores the zero contribution
+            # and every run reports block_fraction 0. An ablated forward must
+            # leave the last clean measurement in place.
+            if not self.training and not self.block._ablated:
                 with torch.no_grad():
                     self._stats["block_rms"] = float(
                         delta.detach().pow(2).mean().sqrt()
@@ -333,7 +359,7 @@ def read_documents(path: str, sep: str = "===DOC===") -> list[str]:
 
 def load_corpus(
     cfg: TrainConfig, tokenizer, *, tiny: bool = False
-) -> tuple[PackedCorpus, PackedCorpus]:
+) -> tuple[PackedCorpus, PackedCorpus, PackedCorpus]:
     if tiny:
         # The synthetic corpus is part of the *data*, not the run: it must be
         # identical for every arm and seed so the tiny path honours §5.5 too.
@@ -344,17 +370,49 @@ def load_corpus(
         ]
         corpus = PackedCorpus(docs, eos_id=0)
     else:
+        import hashlib
+        from pathlib import Path
+
         texts = read_documents(cfg.corpus, cfg.corpus_sep)
         if cfg.max_docs is not None:
             texts = texts[: cfg.max_docs]
-        corpus = PackedCorpus.from_texts(
-            texts,
-            tokenizer,
-            max_docs=cfg.max_docs,
-            max_tokens=cfg.max_tokens,
-            min_tokens=cfg.context + cfg.eval_prefix + cfg.eval_target,
-        )
-    return corpus.split(cfg.test_fraction, seed=cfg.split_seed)
+
+        cache_path = None
+        if cfg.cache:
+            key_src = "|".join(
+                [
+                    str(Path(cfg.corpus).resolve()),
+                    str(Path(cfg.corpus).stat().st_mtime_ns),
+                    cfg.model_id,
+                    str(cfg.max_docs),
+                    str(cfg.max_tokens),
+                    str(cfg.context + cfg.eval_prefix + cfg.eval_target),
+                ]
+            )
+            key = hashlib.sha256(key_src.encode()).hexdigest()[:16]
+            cache_path = Path(cfg.cache_dir) / f"corpus_{key}.npz"
+
+        if cache_path is not None and cache_path.exists():
+            corpus = PackedCorpus.from_cache(cache_path)
+            print(f"[data] loaded cached corpus {cache_path}", flush=True)
+        else:
+            corpus = PackedCorpus.from_texts(
+                texts,
+                tokenizer,
+                max_docs=cfg.max_docs,
+                max_tokens=cfg.max_tokens,
+                min_tokens=cfg.context + cfg.eval_prefix + cfg.eval_target,
+            )
+            if cache_path is not None:
+                corpus.save(cache_path)
+                print(
+                    f"[data] cached {len(corpus.docs)} docs / "
+                    f"{corpus.n_tokens} tokens at {cache_path}",
+                    flush=True,
+                )
+    return corpus.split_with_dev(
+        cfg.test_fraction, cfg.dev_fraction, seed=cfg.split_seed
+    )
 
 
 # --------------------------------------------------------------------------
@@ -371,11 +429,83 @@ def _n_steps(cfg: TrainConfig) -> int:
     return min(steps, cfg.max_steps) if cfg.max_steps is not None else steps
 
 
+def save_checkpoint(model: E1Model, directory: Path, *, step: int) -> Path:
+    """Write one checkpoint and return its directory.
+
+    Every call creates a new directory. Nothing here deletes an older
+    checkpoint or picks a best one: docs/EXPERIMENTS.md §9 forbids selecting
+    the checkpoint by its score, and the analysis reads only the final one.
+    The adapter (or the full module, if this is not a PEFT model) and the
+    inserted block/head are stored separately, because the block is not part
+    of the backbone the adapter wraps.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    base = model.base
+    if hasattr(base, "save_pretrained"):
+        base.save_pretrained(directory / "adapter")
+    else:
+        torch.save(base.state_dict(), directory / "base.pt")
+    if model.block is not None:
+        torch.save(model.block.state_dict(), directory / "block.pt")
+    if model.head is not None:
+        torch.save(model.head.state_dict(), directory / "head.pt")
+    (directory / "trainer_state.json").write_text(
+        json.dumps({"step": step}) + "\n", encoding="utf-8"
+    )
+    return directory
+
+
+def _checkpoint_root(cfg: TrainConfig) -> Path:
+    return Path(cfg.checkpoint_dir) / f"{cfg.arm}_s{cfg.seed}"
+
+
+@torch.no_grad()
+def held_out_nll(cfg: TrainConfig, model: E1Model, corpus: PackedCorpus) -> float:
+    """Mean token NLL of a small fixed batch from ``corpus``.
+
+    This is the cheap dev measurement the convergence rule reads at each log
+    interval. The batch is redrawn from ``split_seed`` every call, so the
+    number is comparable across steps. It must not be called on the sealed
+    test split: test is read once per claim, at the end, by :func:`evaluate`.
+    """
+    was_training = model.training
+    model.eval()
+    try:
+        rng = np.random.default_rng(cfg.split_seed)
+        batches = []
+        for _ in range(2):
+            x_np, _ = corpus.train_batch(rng, cfg.batch_size, cfg.context)
+            input_ids = torch.as_tensor(x_np, dtype=torch.long, device=cfg.device)
+            logits = model(input_ids).logits
+            logp = torch.log_softmax(logits[:, :-1].float(), dim=-1)
+            target = input_ids[:, 1:]
+            token = logp.gather(-1, target.unsqueeze(-1)).squeeze(-1)
+            batches.append(-token.mean())
+        return float(torch.stack(batches).mean())
+    finally:
+        model.train(was_training)
+
+
+def _corpus_sha256(corpus: PackedCorpus) -> str:
+    """Hash the packed training stream in stored document order.
+
+    The order is the split, not the seed-dependent shuffle, so every arm of a
+    seed hashes the same bytes. The sealed test documents are not included:
+    they are not part of the stream the model trains on.
+    """
+    def _tokens():
+        for doc in corpus.docs:
+            yield from doc
+
+    return token_stream_sha256(_tokens())
+
+
 def train(
     cfg: TrainConfig,
     model: E1Model,
     train_corpus: PackedCorpus,
     *,
+    dev_corpus: PackedCorpus | None = None,
     tiny: bool = False,
 ) -> dict:
     """Run the arm's optimisation loop and return a metrics dictionary."""
@@ -383,6 +513,10 @@ def train(
     jepa_on = bool(wiring["jepa"]) and cfg.jepa_weight > 0.0
     if wiring["scramble"] and cfg.batch_size * cfg.grad_accum < 2:
         raise ValueError("arm E needs at least two sequences to scramble targets")
+    if cfg.checkpoint_every < 1:
+        raise ValueError(
+            f"checkpoint_every must be positive, got {cfg.checkpoint_every}"
+        )
     lr = 0.0 if cfg.arm == "PC_lo" else cfg.lr
 
     params = model.trainable_parameters()
@@ -396,13 +530,19 @@ def train(
     history: list[dict] = []
     started = time.time()
     model.train()
+    nan_counter = NanCounter()
 
     global_step = 0
     for step in range(n_steps):
         opt.zero_grad(set_to_none=True)
         step_lm = 0.0
         step_jepa = 0.0
-        for _ in range(cfg.grad_accum):
+        step_diag: dict | None = None
+        step_stats: dict[str, float] | None = None
+        micro_done = 0
+        tainted = False
+        will_log = (step + 1) % cfg.log_every == 0 or (step + 1) == n_steps
+        for micro in range(cfg.grad_accum):
             x_np, _ = train_corpus.train_batch(
                 rng, cfg.batch_size, cfg.context
             )
@@ -416,6 +556,7 @@ def train(
                 input_ids[:, 1:].reshape(-1),
             )
             loss = lm
+            diag = None
             if jepa_on:
                 s = model.student_states(out.hidden_states)
                 t_out = model(input_ids, teacher=True)
@@ -424,7 +565,7 @@ def train(
                     # Each row predicts another row's future. Roll by one keeps
                     # the distribution of targets but destroys correspondence.
                     t_states = torch.roll(t_states, shifts=1, dims=0)
-                jepa, _diag = combined_loss(
+                jepa, diag = combined_loss(
                     s.float(),
                     t_states.float(),
                     cfg.delta,
@@ -434,41 +575,115 @@ def train(
                 )
                 loss = loss + cfg.jepa_weight * jepa
                 step_jepa += float(jepa.detach())
+            # A non-finite loss or gradient is discarded and counted. Applying
+            # it would poison the weights, and an arm that skips more often
+            # than another has been trained on a different distribution
+            # (docs/PROTOCOL.md §10). The whole optimiser step is skipped: a
+            # bad microbatch has already been added into the accumulated grad.
+            if microbatch_nonfinite(params, loss):
+                nan_counter.record()
+                opt.zero_grad(set_to_none=True)
+                tainted = True
+                tokens_seen += int(input_ids.numel())
+                micro_done += 1
+                break
             (loss / cfg.grad_accum).backward()
+            if microbatch_nonfinite(params):
+                nan_counter.record()
+                opt.zero_grad(set_to_none=True)
+                tainted = True
+                tokens_seen += int(input_ids.numel())
+                micro_done += 1
+                break
             step_lm += float(lm.detach())
+            step_diag = diag
             tokens_seen += int(input_ids.numel())
+            micro_done += 1
+            if will_log and micro == cfg.grad_accum - 1:
+                step_stats = representation_stats(
+                    model.student_states(out.hidden_states)
+                )
+
+        if tainted:
+            global_step += 1
+            if will_log:
+                print(
+                    f"[{cfg.arm} s{cfg.seed}] step {global_step}/{n_steps} "
+                    f"skipped non-finite microbatch "
+                    f"(nan_skips={nan_counter.total})",
+                    flush=True,
+                )
+            continue
 
         torch.nn.utils.clip_grad_norm_(params, 1.0)
         opt.step()
         global_step += 1
 
+        if global_step % cfg.checkpoint_every == 0:
+            # Kept alongside every other interval checkpoint. Not compared.
+            save_checkpoint(
+                model,
+                _checkpoint_root(cfg) / f"step_{global_step:06d}",
+                step=global_step,
+            )
+
         if global_step % cfg.log_every == 0 or global_step == n_steps:
+            denom = max(micro_done, 1)
+            val_nll = (
+                held_out_nll(cfg, model, dev_corpus)
+                if dev_corpus is not None
+                else None
+            )
             rec = {
                 "step": global_step,
-                "lm": step_lm / cfg.grad_accum,
-                "jepa": step_jepa / cfg.grad_accum if jepa_on else None,
+                "lm": step_lm / denom,
+                "jepa": step_jepa / denom if jepa_on else None,
+                "var": None if step_diag is None else step_diag.get("var"),
+                "cov": None if step_diag is None else step_diag.get("cov"),
+                "std_z": None if step_stats is None else step_stats["std_z"],
+                "effective_rank": (
+                    None if step_stats is None else step_stats["effective_rank"]
+                ),
+                "val_nll": val_nll,
                 "tokens": tokens_seen,
                 "seconds": round(time.time() - started, 2),
+                "nan_skips": nan_counter.total,
             }
             history.append(rec)
+            extra = ""
+            if rec["jepa"] is not None:
+                extra += f" jepa={rec['jepa']:.4f}"
+            if rec["var"] is not None:
+                extra += f" var={rec['var']:.4f} cov={rec['cov']:.4f}"
+            if rec["std_z"] is not None:
+                extra += (
+                    f" std_z={rec['std_z']:.4f}"
+                    f" erank={rec['effective_rank']:.2f}"
+                )
+            if val_nll is not None:
+                extra += f" val_nll={val_nll:.4f}"
             print(
                 f"[{cfg.arm} s{cfg.seed}] step {global_step}/{n_steps} "
-                f"lm={rec['lm']:.4f}"
-                + (f" jepa={rec['jepa']:.4f}" if rec["jepa"] is not None else "")
-                + f" tokens={tokens_seen}",
+                f"lm={rec['lm']:.4f}{extra} tokens={tokens_seen}",
                 flush=True,
             )
 
+    # The final checkpoint is always written, including when the last step
+    # was also an interval checkpoint. Analysis uses this path and no other.
+    final_checkpoint = save_checkpoint(
+        model, _checkpoint_root(cfg) / "final", step=global_step
+    )
+    elapsed = time.time() - started
     return {
         "steps": global_step,
         "tokens_seen": tokens_seen,
         "lr": lr,
         "jepa_on": jepa_on,
-        "seconds": round(time.time() - started, 2),
-        "tokens_per_second": (
-            tokens_seen / (time.time() - started) if time.time() > started else 0.0
-        ),
+        "seconds": round(elapsed, 2),
+        "tokens_per_second": tokens_seen / elapsed if elapsed > 0 else 0.0,
         "history": history,
+        "nan_skips": nan_counter.total,
+        "final_checkpoint": str(final_checkpoint),
     }
 
 
@@ -502,6 +717,9 @@ def evaluate(
     nll_true_all: list[float] = []
     nll_shuf_all: list[float] = []
     ablated_gains: list[float] = []
+    # Snapshot of the last *clean* forward. The ablated re-forward must not
+    # be what the washout diagnostic reports.
+    clean_stats: dict[str, float] = {}
 
     for start in range(0, len(items), cfg.eval_batch):
         batch = items[start : start + cfg.eval_batch]
@@ -526,6 +744,8 @@ def evaluate(
 
         nll_true = nll_for(true_ids)
         nll_shuf = nll_for(shuf_ids)
+        if model.block is not None and not model.block._ablated and model._stats:
+            clean_stats = dict(model._stats)
         gains.extend(
             float(g) for g in context_gain(
                 torch.tensor(nll_true), torch.tensor(nll_shuf)
@@ -572,12 +792,15 @@ def evaluate(
             }
         )
         # Washout diagnostic: if the block's contribution is a tiny fraction of
-        # the residual, a null means "washed out", not "unhelpful".
-        if "block_rms" in model._stats and "residual_rms" in model._stats:
-            result["block_rms"] = model._stats["block_rms"]
-            result["residual_rms"] = model._stats["residual_rms"]
+        # the residual, a null means "washed out", not "unhelpful". Read the
+        # snapshot taken before ablation, not the live stats the ablated
+        # forward would have overwritten.
+        if "block_rms" in clean_stats and "residual_rms" in clean_stats:
+            result["block_rms"] = clean_stats["block_rms"]
+            result["residual_rms"] = clean_stats["residual_rms"]
             result["block_fraction"] = (
-                model._stats["block_rms"] / max(model._stats["residual_rms"], 1e-12)
+                clean_stats["block_rms"]
+                / max(clean_stats["residual_rms"], 1e-12)
             )
     return result
 
@@ -587,7 +810,21 @@ def evaluate(
 # --------------------------------------------------------------------------
 
 
+def _peak_vram_gb(device: str) -> float:
+    """Peak allocated VRAM in GiB, or 0 when the run is not on CUDA.
+
+    ``max_memory_allocated`` is the quantity the manifest records. A CPU run
+    has no VRAM figure; 0 is an honest reading, not a missing field.
+    """
+    if device.startswith("cuda") and torch.cuda.is_available():
+        return float(torch.cuda.max_memory_allocated() / (1024**3))
+    return 0.0
+
+
 def run(cfg: TrainConfig, *, tiny: bool = False, tokenizer=None) -> dict:
+    started = time.perf_counter()
+    if cfg.device.startswith("cuda") and torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
     torch.manual_seed(spawn_key(cfg.seed, "lora_init"))
     model, _ = build_e1_model(cfg, tiny=tiny)
     if not tiny:
@@ -597,7 +834,7 @@ def run(cfg: TrainConfig, *, tiny: bool = False, tokenizer=None) -> dict:
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
-    train_corpus, test_corpus = load_corpus(cfg, tokenizer, tiny=tiny)
+    train_corpus, dev_corpus, test_corpus = load_corpus(cfg, tokenizer, tiny=tiny)
     eval_items = test_corpus.eval_items(
         cfg.eval_items,
         prefix=cfg.eval_prefix,
@@ -615,8 +852,25 @@ def run(cfg: TrainConfig, *, tiny: bool = False, tokenizer=None) -> dict:
         digest.update(np.asarray(it.shuffled_ids, dtype=np.int64).tobytes())
     eval_fingerprint = digest.hexdigest()
 
-    train_metrics = train(cfg, model, train_corpus, tiny=tiny)
+    train_metrics = train(
+        cfg, model, train_corpus, dev_corpus=dev_corpus, tiny=tiny
+    )
     eval_metrics = evaluate(cfg, model, eval_items, tiny=tiny)
+    wall_clock_s = time.perf_counter() - started
+    record = RunManifest(
+        run_id=f"e1/{cfg.arm}/s{cfg.seed}",
+        git_commit=capture_git_commit(_REPO_ROOT),
+        config_sha256=hash_config(asdict(cfg)),
+        corpus_sha256=_corpus_sha256(train_corpus),
+        spawn_keys=spawn_keys_for_seed(cfg.seed),
+        token_budget=int(cfg.tokens),
+        final_checkpoint=str(train_metrics["final_checkpoint"]),
+        wall_clock_s=float(wall_clock_s),
+        peak_vram_gb=_peak_vram_gb(cfg.device),
+        nan_skips=int(train_metrics["nan_skips"]),
+        arms=[cfg.arm],
+        notes=f"arm={cfg.arm} seed={cfg.seed}",
+    )
     return {
         "config": asdict(cfg),
         "arm": cfg.arm,
@@ -640,8 +894,10 @@ def run(cfg: TrainConfig, *, tiny: bool = False, tokenizer=None) -> dict:
             ),
             "eval_fingerprint": eval_fingerprint,
             "train_docs": len(train_corpus.docs),
+            "dev_docs": len(dev_corpus.docs),
             "test_docs": len(test_corpus.docs),
         },
+        "run_manifest": record.to_dict(),
         "train": train_metrics,
         "eval": eval_metrics,
     }
@@ -668,6 +924,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float32"])
     p.add_argument("--log-every", type=int, default=25)
+    p.add_argument("--checkpoint-every", type=int, default=500)
+    p.add_argument("--checkpoint-dir", default="artifacts/e1/checkpoints")
+    p.add_argument("--dev-fraction", type=float, default=0.05)
     p.add_argument("--tiny", action="store_true", help="CPU smoke test, no download")
     p.add_argument("--out", default=None)
     args = p.parse_args(argv)
@@ -694,6 +953,9 @@ def main(argv: list[str] | None = None) -> int:
         corpus=args.corpus,
         max_docs=args.max_docs,
         max_tokens=args.max_tokens,
+        dev_fraction=args.dev_fraction,
+        checkpoint_every=args.checkpoint_every,
+        checkpoint_dir=args.checkpoint_dir,
     )
 
     print(
@@ -703,19 +965,44 @@ def main(argv: list[str] | None = None) -> int:
     )
     result = run(cfg, tiny=args.tiny)
     ev = result["eval"]
+    record = result["run_manifest"]
+    history = result["train"]["history"]
+    val_nll = history[-1]["val_nll"] if history else None
     print("-" * 60)
     print(f"P1 context gain : {ev['context_gain_mean']:+.5f} nats/token")
     if "necessity_mean" in ev:
         print(f"P3 necessity    : {ev['necessity_mean']:+.5f} nats/token")
     if "block_fraction" in ev:
         print(f"block fraction  : {ev['block_fraction']:.4f} of residual RMS")
+    if val_nll is not None:
+        print(f"val NLL         : {val_nll:.5f}")
+    print(f"checkpoint      : {record['final_checkpoint']}")
+    print("manifest fields :")
+    for name in (
+        "run_id",
+        "git_commit",
+        "config_sha256",
+        "corpus_sha256",
+        "spawn_keys",
+        "token_budget",
+        "final_checkpoint",
+        "wall_clock_s",
+        "peak_vram_gb",
+        "nan_skips",
+        "arms",
+        "notes",
+    ):
+        print(f"  {name}: {record[name]}")
     print("-" * 60)
 
     if args.out:
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(result, indent=2))
+        manifest_path = out.with_suffix(".manifest.json")
+        RunManifest.from_dict(record).to_json(manifest_path)
         print(f"wrote {out}")
+        print(f"wrote {manifest_path}")
     return 0
 
 

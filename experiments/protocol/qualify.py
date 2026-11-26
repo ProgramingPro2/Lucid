@@ -20,7 +20,7 @@ import threading
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 import torch
 from torch import nn
@@ -31,6 +31,33 @@ MIN_NAN_SKIPS = 0
 MIN_THROUGHPUT_TOK_S = 2000.0
 MIN_MICRO_BATCH = 4
 MAX_ARM_NAN_SPREAD_PP = 2.0
+
+
+def microbatch_nonfinite(
+    params: Iterable[nn.Parameter],
+    loss: torch.Tensor | None = None,
+) -> bool:
+    """True when a microbatch must be discarded and counted.
+
+    A non-finite loss, or a non-finite gradient on any parameter, would write
+    NaNs into the weights on the next ``opt.step``. The qualification gate
+    (docs/PROTOCOL.md §10) requires the count of such microbatches to be zero,
+    because an arm-dependent skip rate confounds the treatment with the
+    harness. This function only inspects. It does not modify gradients and it
+    does not touch CUDA, so the guard can be tested on CPU.
+
+    ``params`` is any iterable of parameters. A parameter with no gradient yet
+    is finite: nothing has been written.
+    """
+    if loss is not None and not bool(torch.isfinite(loss).all().item()):
+        return True
+    for param in params:
+        grad = param.grad
+        if grad is None:
+            continue
+        if not bool(torch.isfinite(grad).all().item()):
+            return True
+    return False
 
 
 class NanCounter:

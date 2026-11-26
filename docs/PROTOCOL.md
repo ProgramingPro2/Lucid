@@ -216,8 +216,13 @@ n_main = ceil( 10.5 × (1.29 · SD_pilot / MPID)² )     clipped to [24, 64]
 - constant 10.5 = (z₀.₉₇₅ + z₀.₉₀)² = (1.960 + 1.282)², i.e. two-sided α 0.025
   and power 0.90. No extra t-inflation is applied here because the pilot SD
   factor below already inflates the numerator;
-- 1.29 = the 80 % upper confidence factor on an SD estimated from **10** seeds
-  (a 3-seed pilot gives 2.1× and would under-size the study by ~4.4×);
+- 1.29 = the 80 % upper confidence factor on an SD estimated from **10** seeds,
+  from `experiments.protocol.stats.pilot_sd_inflation` (4 seeds gives 1.73×,
+  3 seeds gives 2.12×, the ~2.1× used in planning). A 3-seed pilot's factor
+  squared is ~4.5, so using the raw SD would under-size the study by ~4.4×.
+  The factor multiplies a within-design paired SD. It is not a run-level
+  variance, and a pilot that prints a sample size must say which of the two
+  it used;
 - floor 24 is adequate at 80 % power; the cap 64 is where a larger *n* stops
   buying anything and the pipeline becomes the suspect.
 
@@ -247,14 +252,27 @@ which is the E1 default in §5.1.
 
 ### 5.6 Training budget
 
-30M tokens per run. Pre-registered extension rule: if the val context-gain slope
+30M tokens per confirmatory training run: cells A, B, A′, B′, E and D, the
+shared trunk, and the joint-training confirmation. The same constant is
+`experiments.e1.arms.TOKENS_PER_RUN`. Positive-control arms stay at 2M tokens
+because they are an assay, not a cell of the factorial. N does not train.
+
+Pre-registered extension rule: if the val context-gain slope
 exceeds 0.2 × MPID per 1M tokens at the endpoint, extend **all** runs by 30M.
 Applying it to all arms or none is what keeps it from becoming optional stopping.
+The slope is computed on the dev split. The sealed test split is not read to
+make this decision.
 
-Convergence criterion, applied to every arm: held-out NLL improvement < 0.5 % over
-the last 20 % of steps, or 2 full epochs. F20 is the warning here — the scratch
-writer was stopped mid-descent and the comparison was between two partial
-solutions.
+Convergence criterion, applied to every arm: held-out (dev) NLL improvement
+< 0.5 % over the last 20 % of steps. Epochs are not a criterion. A 30M-token
+arm is a small fraction of the corpus — the 2026-11-20 pilot's train split
+alone was 14.8M tokens, and one pass over the confirmatory corpus is hundreds
+of millions of tokens — so an epoch count cannot fire and must not be used as
+a second stopping rule. The slope rule above is the only extension rule.
+
+F20 is the warning here — the scratch writer was stopped mid-descent and the
+comparison was between two partial solutions. The held-out slope is what
+catches that.
 
 ---
 
@@ -544,9 +562,22 @@ attempt at that wall needs a **new mechanism**, not a new hyperparameter.
 
 ## 14. Amendments
 
-None yet. Amendments are appended with a date, the reason, and the stage they
-affect. An amendment after data has been seen on the affected contrast is a
-protocol deviation and is reported as one.
+Amendments are appended with a date, the reason, and the stage they affect.
+An amendment after data has been seen on the affected contrast is a protocol
+deviation and is reported as one.
+
+### 2026-11-25 — E1 budget is 30M tokens; epochs are not a stopping rule
+
+§5.6 already said 30M tokens per run. `docs/EXPERIMENTS.md` §3 and
+`experiments/e1/arms.py` said 10M for A, B, A′, B′ and E. Those cells, D, the
+shared trunk and the joint confirmation are 30M, via `TOKENS_PER_RUN`. The
+epoch-count clause is removed from the convergence criterion. Arm budgets
+are small relative to the corpus, so an epoch rule cannot fire; the
+validation-slope rule is the only extension, and it applies to all arms or
+none. The 2026-11-20 pilot (docs/runs/2026-11-20-e1-pilot.md) is excluded
+under §11 of the experiments manifest and was not run at this budget, so this
+amendment is made before the confirmatory contrast rather than after a
+completed one. It affects G1–G2.
 
 ---
 

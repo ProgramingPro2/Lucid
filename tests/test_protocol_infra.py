@@ -36,6 +36,7 @@ from experiments.protocol.qualify import (
     assert_token_streams_identical,
     check_step0_identity,
     from_json,
+    microbatch_nonfinite,
     report_to_json,
 )
 from experiments.protocol.seeds import STREAMS, spawn_key
@@ -172,6 +173,32 @@ def test_capture_git_commit_never_raises(tmp_path):
 # --------------------------------------------------------------------------
 # NanCounter
 # --------------------------------------------------------------------------
+
+
+def test_microbatch_nonfinite_detects_nan_and_inf_without_mutating():
+    """The guard reports a bad microbatch and leaves the gradient alone.
+
+    Sanitising in place would hide the skip from the qualification count.
+    CPU only: the check must not require a device.
+    """
+    clean = nn.Parameter(torch.zeros(4))
+    clean.grad = torch.ones(4)
+    assert microbatch_nonfinite([clean]) is False
+    assert microbatch_nonfinite([clean], torch.tensor(1.5)) is False
+    assert torch.equal(clean.grad, torch.ones(4))
+
+    bad = nn.Parameter(torch.zeros(4))
+    bad.grad = torch.tensor([1.0, float("nan"), 0.0, float("inf")])
+    assert microbatch_nonfinite([bad]) is True
+    assert float(bad.grad[0]) == 1.0
+    assert torch.isnan(bad.grad[1])
+    assert float(bad.grad[2]) == 0.0
+    assert torch.isinf(bad.grad[3])
+
+    untouched = nn.Parameter(torch.zeros(2))
+    assert microbatch_nonfinite([untouched]) is False
+    assert microbatch_nonfinite([clean], torch.tensor(float("nan"))) is True
+    assert microbatch_nonfinite([clean], torch.tensor(float("inf"))) is True
 
 
 def test_nan_counter_counts_and_reports_a_rate():

@@ -167,6 +167,37 @@ def mde(sd: float, n: int, *, alpha: float = 0.05, power: float = 0.90) -> float
     return (z_alpha + z_power) * sd / np.sqrt(n)
 
 
+def pilot_sd_inflation(n_seeds: int) -> float:
+    """80% upper confidence factor on an SD estimated from ``n_seeds``.
+
+    A pilot SD is a single draw. Plugging it into ``required_n`` uninflated
+    under-sizes the confirmatory study, which is how a 4-seed pilot printed
+    ``required n = 1``. The factor is the one-sided 80% upper bound on the
+    true SD relative to the sample SD, from a chi-square on ``n_seeds - 1``
+    degrees of freedom::
+
+        sqrt( df / chi2.ppf(0.20, df) )
+
+    Planning anchors (docs/PROTOCOL.md §5.4), rounded to two decimals:
+
+    * 3 seeds -> 2.12 (the protocol text's "~2.1×"; 2.12² ≈ 4.5, the
+      under-sizing the text calls ~4.4×);
+    * 4 seeds -> 1.73;
+    * 10 seeds -> 1.29, which is the factor in the displayed sample-size
+      formula.
+
+    The factor multiplies a **within-design** SD (the SD of a paired
+    difference). It is not a correction for run-level variance, and it does
+    not turn a within-design SD into one.
+    """
+    if n_seeds < 2:
+        raise ValueError(
+            f"an SD needs at least 2 seeds to inflate, got {n_seeds}"
+        )
+    df = n_seeds - 1
+    return float(np.sqrt(df / st.chi2.ppf(0.20, df)))
+
+
 def required_n(
     sd: float,
     mpid: float,

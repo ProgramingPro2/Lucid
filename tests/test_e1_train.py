@@ -13,6 +13,8 @@ contrast depends on, not any scientific claim:
 from __future__ import annotations
 
 import copy
+import math
+from pathlib import Path
 
 import pytest
 import torch
@@ -155,6 +157,118 @@ def test_masked_nll_matches_manual_calculation():
     labels = torch.tensor([[-100, 1, 2]])
     nll = masked_nll(logits, labels)
     assert nll == pytest.approx(torch.log(torch.tensor(4.0)).item(), rel=1e-6)
+
+
+def test_evaluate_reports_positive_block_fraction_when_block_is_nonzero(tmp_path):
+    """The washout fraction is taken from a clean forward, not the ablated one.
+
+    A zero reading on a block that has moved is the bug: evaluate used to
+    ablate and re-forward before reading block_rms, so every run reported 0.
+    """
+    cfg = _cfg(
+        arm="A",
+        tokens=1024,
+        context=32,
+        eval_items=2,
+        eval_prefix=16,
+        eval_target=8,
+        log_every=1000,
+        checkpoint_dir=str(tmp_path / "ckpts"),
+    )
+    model, _ = build_e1_model(cfg, tiny=True)
+    train_corpus, test_corpus = _load(cfg)
+    train(cfg, model, train_corpus, tiny=True)
+    items = test_corpus.eval_items(2, prefix=16, target=8, seed=0)
+    ev = evaluate(cfg, model, items, tiny=True)
+    assert ev["block_fraction"] > 0.0
+
+
+def test_run_records_manifest_checkpoint_val_nll_and_collapse(tmp_path):
+    """A finished run has the §11 record, every checkpoint, and a dev NLL.
+
+    The dev NLL is not the sealed test number. Collapse terms that
+    ``combined_loss`` already computed must survive into the history instead
+    of being discarded.
+    """
+    from experiments.protocol.manifest import (
+        REQUIRED_FIELDS,
+        RunManifest,
+        validate_completeness,
+    )
+
+    cfg = _cfg(
+        arm="A",
+        tokens=256,
+        context=32,
+        eval_items=2,
+        eval_prefix=16,
+        eval_target=8,
+        log_every=1,
+        checkpoint_every=1,
+        checkpoint_dir=str(tmp_path / "ckpts"),
+    )
+    result = run(cfg, tiny=True)
+    record = result["run_manifest"]
+    manifest = RunManifest.from_dict(record)
+    assert validate_completeness(manifest) == []
+    for name in REQUIRED_FIELDS:
+        assert name in record
+    assert len(record["spawn_keys"]) == 6
+    assert record["nan_skips"] == 0
+    final = Path(record["final_checkpoint"])
+    assert final.is_dir()
+    assert (final / "block.pt").is_file()
+    root = Path(cfg.checkpoint_dir) / f"{cfg.arm}_s{cfg.seed}"
+    step_dirs = [p for p in root.iterdir() if p.name.startswith("step_")]
+    assert step_dirs, "interval checkpoints must be kept, not only the final"
+    assert result["manifest"]["dev_docs"] >= 1
+    assert result["manifest"]["train_docs"] >= 1
+    assert result["manifest"]["test_docs"] >= 1
+    last = result["train"]["history"][-1]
+    assert last["val_nll"] is not None and math.isfinite(last["val_nll"])
+    assert last["std_z"] is not None and math.isfinite(last["std_z"])
+    assert last["effective_rank"] is not None and math.isfinite(last["effective_rank"])
+    assert last["var"] is not None and math.isfinite(last["var"])
+    assert last["cov"] is not None and math.isfinite(last["cov"])
+
+
+def test_training_counts_and_skips_a_nonfinite_microbatch(tmp_path, monkeypatch):
+    """A NaN loss is counted and not applied. The qualification gate needs the count."""
+    cfg = _cfg(
+        arm="D",
+        tokens=256,
+        context=32,
+        log_every=100,
+        checkpoint_dir=str(tmp_path / "ckpts"),
+    )
+    model, _ = build_e1_model(cfg, tiny=True)
+    before = {
+        name: p.detach().clone()
+        for name, p in model.named_parameters()
+        if p.requires_grad
+    }
+    real = torch.nn.functional.cross_entropy
+    state = {"n": 0}
+
+    def fake(*args, **kwargs):
+        state["n"] += 1
+        if state["n"] == 1:
+            return torch.tensor(float("nan"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr("experiments.e1.train.F.cross_entropy", fake)
+    train_corpus, _ = _load(cfg)
+    metrics = train(cfg, model, train_corpus, tiny=True)
+    # One discarded microbatch, and the later steps still applied an update.
+    assert metrics["nan_skips"] == 1
+    moved = False
+    named = dict(model.named_parameters())
+    for name, old in before.items():
+        param = named[name]
+        assert torch.isfinite(param).all(), name
+        if not torch.equal(old, param.detach()):
+            moved = True
+    assert moved
 
 
 def test_evaluate_necessity_is_zero_for_untrained_zero_block():

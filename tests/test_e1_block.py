@@ -15,6 +15,62 @@ from experiments.e1.objective import (
 )
 
 
+def test_causal_attn_mask_is_lower_triangular():
+    """0 on and below the diagonal, -inf strictly above it, dtype preserved.
+
+    A finite penalty above the diagonal would only down-weight the future.
+    The language-model loss would still move when a later token changed.
+    """
+    from experiments.e1.block import causal_attn_mask
+
+    mask = causal_attn_mask(8, torch.float32, torch.device("cpu"))
+    assert mask.shape == (8, 8)
+    assert mask.dtype == torch.float32
+    upper = torch.triu(torch.ones(8, 8, dtype=torch.bool), diagonal=1)
+    assert torch.isneginf(mask.masked_select(upper)).all()
+    assert torch.equal(
+        mask.masked_select(~upper), torch.zeros(int((~upper).sum()))
+    )
+    mask64 = causal_attn_mask(4, torch.float64, torch.device("cpu"))
+    assert mask64.dtype == torch.float64
+    assert torch.isneginf(mask64[0, 1])
+    assert float(mask64[1, 0]) == 0.0
+    assert float(mask64[1, 1]) == 0.0
+
+
+def test_nonzero_block_does_not_leak_future_tokens_into_logits():
+    """Perturbing token t+k leaves logits at positions <= t bit-identical.
+
+    The output projection is random, so the block is not the identity. A
+    zero-init block would pass a leak test without being causal. Equality is
+    exact: a tolerance is how the original leak (~1e-3) was small enough to
+    miss and large enough to contaminate the LM loss.
+    """
+    from experiments.e1.train import E1Model, TrainConfig, attach_lora, build_base
+
+    torch.manual_seed(0)
+    cfg = TrainConfig(arm="A", seed=0, device="cpu", dtype="float32")
+    base = attach_lora(build_base(cfg, tiny=True), cfg, tiny=True)
+    block = JEPABlock(64, n_heads=8, zero_init_output=False)
+    with torch.no_grad():
+        block.out.weight.normal_()
+        block.out.bias.normal_()
+    model = E1Model(base, block=block)
+    model.eval()
+
+    ids = torch.randint(0, 512, (2, 32))
+    t, k = 16, 4
+    perturbed = ids.clone()
+    perturbed[:, t + k] = (perturbed[:, t + k] + 17) % 512
+    assert not torch.equal(ids[:, t + k], perturbed[:, t + k])
+
+    with torch.no_grad():
+        logits = model(ids).logits
+        logits_p = model(perturbed).logits
+    assert torch.equal(logits[:, : t + 1], logits_p[:, : t + 1])
+    assert not torch.equal(logits[:, t + k], logits_p[:, t + k])
+
+
 def test_zero_init_block_is_exactly_identity():
     torch.manual_seed(0)
     x = torch.randn(2, 5, 32, dtype=torch.float64)
@@ -187,6 +243,40 @@ def test_whiten_handles_constant_input():
     x = torch.ones(4, 8)
     out = whiten(x)
     assert torch.isfinite(out).all()
+
+
+def test_arm_budgets_match_the_protocol_constant():
+    """A/B/A'/B'/E/D share TOKENS_PER_RUN, and the docs say the same 30M.
+
+    The old table gave the block arms 10M and the protocol 30M. A test that
+    only reads the code would not catch the docs drifting back.
+    """
+    from pathlib import Path
+
+    assert arms_mod.TOKENS_PER_RUN == 30_000_000
+    for name in ("A", "B", "A_prime", "B_prime", "E", "D"):
+        assert arms_mod.by_name(name).token_budget == arms_mod.TOKENS_PER_RUN
+    # The assay and the nuisance arm are not that budget.
+    assert arms_mod.by_name("PC_hi").token_budget != arms_mod.TOKENS_PER_RUN
+    assert arms_mod.by_name("N").token_budget != arms_mod.TOKENS_PER_RUN
+
+    root = Path(__file__).resolve().parents[1]
+    protocol = (root / "docs" / "PROTOCOL.md").read_text(encoding="utf-8")
+    experiments = (root / "docs" / "EXPERIMENTS.md").read_text(encoding="utf-8")
+    assert "2 full epochs" not in protocol
+    section = experiments.split("## 3. E1 manifest", 1)[1].split("## 4.", 1)[0]
+    for row_id in (
+        "`e1/A/s*`",
+        "`e1/B/s*`",
+        "`e1/Ap/s*`",
+        "`e1/Bp/s*`",
+        "`e1/E/s*`",
+        "`e1/D/s*`",
+        "`e1/trunk/s*`",
+    ):
+        line = next(line for line in section.splitlines() if row_id in line)
+        assert "30M" in line, line
+        assert "10M" not in line, line
 
 
 def test_arm_table_and_parameter_matching():

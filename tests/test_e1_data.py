@@ -39,6 +39,36 @@ def test_split_keeps_documents_disjoint():
     assert train.n_tokens + test.n_tokens == corpus.n_tokens
 
 
+def test_dev_split_is_disjoint_and_does_not_move_the_test_set():
+    """Dev is document-disjoint, and the sealed test documents stay put.
+
+    The convergence rule reads dev. If carving dev out reshuffled the test
+    split, every arm's sealed items would change the day the split was added.
+    """
+    corpus = _corpus(n_docs=40, length=200)
+    train, dev, test = corpus.split_with_dev(0.1, 0.05, seed=7)
+    again = corpus.split_with_dev(0.1, 0.05, seed=7)
+    plain_test = corpus.split(0.1, seed=7)[1].docs
+    assert test.docs == plain_test
+    assert train.docs == again[0].docs
+    assert dev.docs == again[1].docs
+    assert test.docs == again[2].docs
+
+    groups = [
+        {tuple(d) for d in train.docs},
+        {tuple(d) for d in dev.docs},
+        {tuple(d) for d in test.docs},
+    ]
+    assert groups[0].isdisjoint(groups[1])
+    assert groups[0].isdisjoint(groups[2])
+    assert groups[1].isdisjoint(groups[2])
+    assert sum(len(g) for g in groups) == len(corpus.docs)
+    assert len(dev.docs) >= 1 and len(train.docs) >= 1
+
+    other_test = corpus.split_with_dev(0.1, 0.05, seed=8)[2].docs
+    assert other_test == corpus.split(0.1, seed=8)[1].docs
+
+
 def test_split_is_deterministic_and_depends_on_seed():
     corpus = _corpus()
     a = corpus.split(0.25, seed=1)[1].docs
@@ -127,6 +157,16 @@ def test_eval_item_validates_alignment():
         EvalItem(doc_index=0, true_ids=[1, 2, 3], shuffled_ids=[1, 2], target_start=1)
     with pytest.raises(ValueError):
         EvalItem(doc_index=0, true_ids=[1, 2, 3], shuffled_ids=[1, 2, 3], target_start=0)
+
+
+def test_cache_roundtrip_preserves_every_token(tmp_path):
+    corpus = _corpus(n_docs=6, length=300)
+    path = tmp_path / "corpus.npz"
+    corpus.save(path)
+    loaded = PackedCorpus.from_cache(path)
+    assert loaded.docs == corpus.docs
+    assert loaded.eos_id == corpus.eos_id
+    assert loaded.n_tokens == corpus.n_tokens
 
 
 def test_from_texts_skips_short_documents():

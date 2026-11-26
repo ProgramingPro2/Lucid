@@ -150,6 +150,36 @@ def combined_loss(
     return total, diag
 
 
+def representation_stats(states: torch.Tensor) -> dict[str, float]:
+    """Collapse diagnostics for a student state ``(..., D)``.
+
+    ``std_z`` is the mean per-dimension standard deviation. A collapsed
+    representation drives it to 0 while a cosine can stay high, which is the
+    F10 failure mode: the prediction looks fine because every vector is the
+    same vector.
+
+    ``effective_rank`` is the exponential entropy of the normalised covariance
+    eigenvalues (Roy and Vetterli). It is 1 when one direction carries the
+    covariance and equals the dimension when variance is spread evenly. The
+    scale of the eigenvalues cancels, so the number is comparable across
+    layers.
+    """
+    flat = states.detach().float().reshape(-1, states.size(-1))
+    if flat.size(0) < 2:
+        return {"std_z": 0.0, "effective_rank": 0.0}
+    std_z = float(flat.std(dim=0, unbiased=False).mean())
+    centred = flat - flat.mean(dim=0, keepdim=True)
+    singular = torch.linalg.svdvals(centred)
+    energy = singular.pow(2)
+    total = energy.sum()
+    if float(total) <= 0.0:
+        return {"std_z": std_z, "effective_rank": 0.0}
+    share = energy / total
+    share = share[share > 0]
+    effective = float(torch.exp(-(share * share.log()).sum()))
+    return {"std_z": std_z, "effective_rank": effective}
+
+
 def context_gain(
     nll_true: torch.Tensor, nll_shuffled: torch.Tensor
 ) -> torch.Tensor:

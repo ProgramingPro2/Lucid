@@ -91,6 +91,73 @@ class PackedCorpus:
             PackedCorpus(test, eos_id=self.eos_id),
         )
 
+    def split_with_dev(
+        self,
+        test_fraction: float = 0.1,
+        dev_fraction: float = 0.05,
+        seed: int = 0,
+    ) -> tuple["PackedCorpus", "PackedCorpus", "PackedCorpus"]:
+        """Document-disjoint train, dev, and test.
+
+        The sealed test documents are exactly those :meth:`split` returns for
+        the same ``test_fraction`` and ``seed``. Dev is drawn from the
+        remainder, so adding a validation split cannot move a document into or
+        out of the test set. The convergence rule and the extension slope are
+        computed on dev; test is read once per claim.
+        """
+        if not 0.0 < dev_fraction < 1.0:
+            raise ValueError("dev_fraction must be in (0, 1)")
+        train_all, test = self.split(test_fraction, seed)
+        n_dev = max(1, int(round(len(self.docs) * dev_fraction)))
+        if n_dev >= len(train_all.docs):
+            raise ValueError("dev split would leave no training documents")
+        rng = np.random.default_rng(seed)
+        order = rng.permutation(len(train_all.docs))
+        dev_idx = {int(i) for i in order[:n_dev]}
+        train = [d for i, d in enumerate(train_all.docs) if i not in dev_idx]
+        dev = [d for i, d in enumerate(train_all.docs) if i in dev_idx]
+        return (
+            PackedCorpus(train, eos_id=self.eos_id),
+            PackedCorpus(dev, eos_id=self.eos_id),
+            test,
+        )
+
+    # -- on-disk cache ------------------------------------------------------
+
+    def save(self, path: str | "Path") -> None:
+        """Cache tokenised documents as a flat array plus offsets.
+
+        Re-tokenising a large text corpus for every arm would dominate pilot
+        wall-clock. The cache stores exactly the ids, so a cached and a fresh
+        corpus are the same corpus.
+        """
+        from pathlib import Path
+
+        lengths = np.asarray([len(d) for d in self.docs], dtype=np.int64)
+        offsets = np.concatenate([[0], np.cumsum(lengths)])
+        tokens = np.concatenate(
+            [np.asarray(d, dtype=np.int32) for d in self.docs]
+        )
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        np.savez(
+            path,
+            tokens=tokens,
+            offsets=offsets,
+            eos_id=-1 if self.eos_id is None else int(self.eos_id),
+        )
+
+    @classmethod
+    def from_cache(cls, path: str | "Path") -> "PackedCorpus":
+        z = np.load(path)
+        tokens = z["tokens"]
+        offsets = z["offsets"]
+        docs = [
+            tokens[int(offsets[i]) : int(offsets[i + 1])].tolist()
+            for i in range(len(offsets) - 1)
+        ]
+        eos = int(z["eos_id"])
+        return cls(docs, eos_id=None if eos < 0 else eos)
+
     def train_batch(
         self,
         rng: np.random.Generator,

@@ -25,20 +25,27 @@ class Arm:
     description: str
 
 
+#: Confirmatory training budget, docs/PROTOCOL.md §5.6. One constant so the
+#: arm table, the manifest, and the protocol cannot each pick a different
+#: number. Positive-control arms are an assay at 2M tokens and are not this
+#: budget; N does not train.
+TOKENS_PER_RUN = 30_000_000
+
+
 def all_arms() -> list[Arm]:
     """The nine cells. ``joint`` runs are counted separately."""
     return [
-        Arm("A", "treatment", True, True, 1.0, "true", 32, 10_000_000,
+        Arm("A", "treatment", True, True, 1.0, "true", 32, TOKENS_PER_RUN,
             "block + JEPA objective: tests C1"),
-        Arm("B", "isotype", True, False, 0.0, "none", 32, 10_000_000,
+        Arm("B", "isotype", True, False, 0.0, "none", 32, TOKENS_PER_RUN,
             "bit-identical block, objective switched off"),
-        Arm("A_prime", "secondary", False, True, 1.0, "true", 32, 10_000_000,
+        Arm("A_prime", "secondary", False, True, 1.0, "true", 32, TOKENS_PER_RUN,
             "parameter-matched head on the trunk, no block: objective without architecture"),
-        Arm("B_prime", "isotype", False, False, 0.0, "none", 32, 10_000_000,
+        Arm("B_prime", "isotype", False, False, 0.0, "none", 32, TOKENS_PER_RUN,
             "head present, objective switched off"),
-        Arm("E", "specificity", True, True, 1.0, "scrambled", 12, 10_000_000,
+        Arm("E", "specificity", True, True, 1.0, "scrambled", 12, TOKENS_PER_RUN,
             "as A, targets permuted across the batch each step"),
-        Arm("D", "vehicle", False, False, 0.0, "none", 6, 30_000_000,
+        Arm("D", "vehicle", False, False, 0.0, "none", 6, TOKENS_PER_RUN,
             "plain LoRA; absolute reference, never a contrast"),
         Arm("N", "nuisance", True, False, 0.0, "none", 3, 1_000_000,
             "frozen random block: estimate of the cost of any random nonlinearity"),

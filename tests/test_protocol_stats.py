@@ -135,6 +135,23 @@ def test_required_n_respects_floor_and_cap():
     assert required_n(1.0, 0.0112, floor=24, cap=64) == 64
 
 
+def test_pilot_sd_inflation_matches_the_planning_anchors():
+    """80% upper factor on a pilot SD: 4 seeds 1.73, 10 seeds 1.29, 3 seeds ~2.12.
+
+    docs/PROTOCOL.md §5.4. The 3-seed value is the chi-square factor the text
+    calls ~2.1×. More seeds must inflate less, or the helper is not a
+    confidence factor.
+    """
+    from experiments.protocol.stats import pilot_sd_inflation
+
+    assert pilot_sd_inflation(4) == pytest.approx(1.73, abs=0.005)
+    assert pilot_sd_inflation(10) == pytest.approx(1.29, abs=0.005)
+    assert pilot_sd_inflation(3) == pytest.approx(2.12, abs=0.005)
+    assert pilot_sd_inflation(10) < pilot_sd_inflation(4) < pilot_sd_inflation(3)
+    with pytest.raises(ValueError):
+        pilot_sd_inflation(1)
+
+
 def test_required_n_e1_case_matches_protocol_table():
     """docs/PROTOCOL.md §5.4: sd=0.015, MPID=0.0112 -> n_main = 32.
 
