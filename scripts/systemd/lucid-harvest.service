@@ -1,0 +1,13 @@
+[Unit]
+Description=Lucid corpus harvest supervisor (wifi window 06:00-23:30 America/New_York)
+Documentation=file:///home/jpearce/Documents/Lucid/docs/CORPUS.md
+
+[Service]
+Type=simple
+WorkingDirectory=/home/jpearce/Documents/Lucid
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/jpearce/Documents/Lucid/.venv/bin/python /home/jpearce/Documents/Lucid/scripts/harvest_supervisor.py --cutoff 2025-06-01 --out artifacts/corpus/biorxiv_2026.jsonl --max-docs 1000000 --delay 4 --quiet-start 23:30 --quiet-end 06:00 --log artifacts/corpus/supervisor.log
+KillSignal=SIGTERM
+SendSIGKILL=no
+TimeoutStopSec=180
+Restart=no

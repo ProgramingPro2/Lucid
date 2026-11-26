@@ -34,6 +34,29 @@ before G0 because E0's items are drawn from it.
 
 ---
 
+## Harvest operational window
+
+Wifi on this machine is off from **23:30 to 06:00 America/New_York** every night. It is a scheduled local outage (the radio is powered off) and it recurs every night. A network-bound harvest still running at 23:30 dies mid-request; the 2026-11-25 run aborted at 23:32 with `Errno 101 Network is unreachable`. Network-bound harvests have to run inside the allowed window, **06:00–23:30** (17.5 hours). The morning timer starts the supervisor at 06:05, five minutes after the radio is back.
+
+`scripts/harvest_supervisor.py` enforces the window. Launched inside the quiet hours, it sleeps until 06:00 and starts nothing. Inside the window it runs `experiments.corpus.harvest` with `--resume`, and if that process exits (crash, abort, or a clean finish) it starts it again after a bounded backoff. Resume is per page and per document id: the cursor sidecar is rewritten through a temp file and `rename`, and document ids already in the JSONL are skipped, so a restart does not lose or duplicate a completed document. At 23:30 the supervisor sends SIGTERM, waits for the child to exit, and does not send SIGKILL.
+
+`harvest.py` installs no SIGTERM handler. Each finished JSONL line is flushed, and the cursor file is not truncated by a kill during its temp write. A signal between the 8 KiB chunks of one large flush can still leave a truncated final line with no newline, and the next append can glue onto it. The build must tolerate a truncated final line. `_load_done` skips a line that is not valid JSON, so resume continues; `load_documents` raises on the same line and does not yet tolerate it.
+
+Any long run whose wall clock could cross 23:30 has to be started early enough to finish, or it dies mid-run. At the measured rate (13.7 docs/min, 3.5 full-text docs/min, about 17.7k tokens per full-text document) one window yields about **65M tokens**. The 3,000-document gate fits in a single window. The **500M-token gate is the binding one**, at about eight days of windowed harvesting. One 30M-token E1 arm is about 2.7 GPU-hours and fits in an evening (latest start 20:48). A six-arm batch is about 16.1 hours and has to start by **07:22** to finish before 23:30.
+
+The user systemd timer `lucid-harvest.timer` starts the supervisor at 06:05. The process exits at 23:30, so it is not left running through the outage. Lingering is already on for this user. The unit files in `scripts/systemd/` are symlinked from `~/.config/systemd/user/`.
+
+Verify:
+
+    systemctl --user list-timers lucid-harvest.timer
+    systemctl --user is-active lucid-harvest.service
+
+Remove:
+
+    systemctl --user disable --now lucid-harvest.timer
+    rm ~/.config/systemd/user/lucid-harvest.service ~/.config/systemd/user/lucid-harvest.timer
+    systemctl --user daemon-reload
+
 ## 1. Why the corpus changes
 
 The current corpus cannot carry a confirmatory claim, for two independent reasons.

@@ -1,0 +1,13 @@
+[Unit]
+Description=Start the Lucid harvest supervisor at 06:05 America/New_York
+Documentation=file:///home/jpearce/Documents/Lucid/docs/CORPUS.md
+
+[Timer]
+OnCalendar=*-*-* 06:05:00 America/New_York
+AccuracySec=30s
+Persistent=false
+RandomizedDelaySec=0
+Unit=lucid-harvest.service
+
+[Install]
+WantedBy=timers.target

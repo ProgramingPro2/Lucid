@@ -28,6 +28,8 @@ See [docs/LIMITATIONS.md](docs/LIMITATIONS.md) for an honest account of scope.
 >
 > Read those before the rest of this README. The text below describes the
 > original prototype and is kept for context.
+>
+> Overnight background agent work is impossible on this host: the network is off from 23:30 to 06:00 America/New_York.
 
 ## How it works
 
