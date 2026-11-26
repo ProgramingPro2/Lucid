@@ -27,9 +27,12 @@ class Arm:
 
 #: Confirmatory training budget, docs/PROTOCOL.md §5.6. One constant so the
 #: arm table, the manifest, and the protocol cannot each pick a different
-#: number. Positive-control arms are an assay at 2M tokens and are not this
-#: budget; N does not train.
+#: number. Positive-control arms are an assay at ``PC_TOKENS`` and are not
+#: this budget. N does not train, so its budget is 0.
 TOKENS_PER_RUN = 30_000_000
+
+#: Positive-control assay, docs/PROTOCOL.md §5.6. Not a cell of the factorial.
+PC_TOKENS = 2_000_000
 
 
 def all_arms() -> list[Arm]:
@@ -47,11 +50,11 @@ def all_arms() -> list[Arm]:
             "as A, targets permuted across the batch each step"),
         Arm("D", "vehicle", False, False, 0.0, "none", 6, TOKENS_PER_RUN,
             "plain LoRA; absolute reference, never a contrast"),
-        Arm("N", "nuisance", True, False, 0.0, "none", 3, 1_000_000,
-            "frozen random block: estimate of the cost of any random nonlinearity"),
-        Arm("PC_hi", "positive_control", False, False, 0.0, "none", 3, 2_000_000,
+        Arm("N", "nuisance", True, False, 0.0, "none", 3, 0,
+            "frozen random block; does not train (PROTOCOL §5.6), so the budget is 0"),
+        Arm("PC_hi", "positive_control", False, False, 0.0, "none", 3, PC_TOKENS,
             "LoRA lr=1e-4; must beat PC_lo or the assay cannot see anything"),
-        Arm("PC_lo", "positive_control", False, False, 0.0, "none", 3, 2_000_000,
+        Arm("PC_lo", "positive_control", False, False, 0.0, "none", 3, PC_TOKENS,
             "LoRA lr=0"),
     ]
 
@@ -61,6 +64,69 @@ def by_name(name: str) -> Arm:
         if a.name == name:
             return a
     raise KeyError(name)
+
+
+@dataclass(frozen=True)
+class ScheduleRow:
+    """A manifest row that is not one of the nine factorial cells.
+
+    Trunk and joint confirmation are confirmatory runs at
+    ``TOKENS_PER_RUN``. The dose grid is G6 only: PROTOCOL §5.6 does not list
+    it among the confirmatory cells, and it is not part of the 219 training
+    units. The experiments manifest still fixes that row at ``TOKENS_PER_RUN``,
+    so the number lives here rather than only in the doc. N is a cell, not a
+    row in this list; its budget is 0 because it does not train.
+    """
+
+    pattern: str
+    count: int
+    token_budget: int
+    note: str
+
+
+def schedule_rows() -> list[ScheduleRow]:
+    """Trunk, joint confirmation, and the G6 dose grid."""
+    return [
+        ScheduleRow(
+            "e1/trunk/s*",
+            32,
+            TOKENS_PER_RUN,
+            "shared LoRA trunk, one per seed; confirmatory budget",
+        ),
+        ScheduleRow(
+            "e1/*/s*.joint",
+            32,
+            TOKENS_PER_RUN,
+            "joint-training confirmation, 8 seeds x 4 cells",
+        ),
+        ScheduleRow(
+            "e1/A/s*.dose*",
+            48,
+            TOKENS_PER_RUN,
+            "G6 mechanism grid only; not a factorial cell and not in the 219",
+        ),
+    ]
+
+
+def resolve_token_budget(arm: str, override: int | None) -> tuple[int, str | None]:
+    """Return ``(tokens, warning)`` for one arm.
+
+    ``override is None`` uses the arm's ``token_budget``. An override that
+    differs from that budget is returned unchanged, with a warning: one
+    shared ``--tokens`` for every arm is how the 2026-11-20 pilot trained
+    the 30M cells for 2M tokens. The warning is the caller's to print. This
+    function does not change the override.
+    """
+    budget = by_name(arm).token_budget
+    if override is None or override == budget:
+        return budget, None
+    warning = (
+        f"WARNING: --tokens {override} for arm {arm} differs from the "
+        f"arm-table budget {budget} (experiments.e1.arms.by_name). The "
+        "voided 2026-11-20 pilot passed one token count for every arm. "
+        f"This run will use {override}, not {budget}."
+    )
+    return override, warning
 
 
 def joint_confirmation_runs() -> int:

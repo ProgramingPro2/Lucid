@@ -42,6 +42,23 @@ REQUIRED_FIELDS: tuple[str, ...] = (
     "nan_skips",
     "arms",
     "notes",
+    "git_dirty",
+    "git_diff_sha256",
+    "determinism",
+)
+
+#: Keys :func:`experiments.e1.train.configure_determinism` records. A manifest
+#: that omits one of them does not say which kernels the run actually used.
+DETERMINISM_FIELDS: tuple[str, ...] = (
+    "enabled",
+    "deterministic_algorithms",
+    "deterministic_algorithms_warn_only",
+    "cudnn_deterministic",
+    "cudnn_benchmark",
+    "matmul_allow_tf32",
+    "cudnn_allow_tf32",
+    "cublas_workspace_config",
+    "float32_matmul_precision",
 )
 
 _HEX_DIGITS = frozenset("0123456789abcdef")
@@ -69,6 +86,12 @@ class RunManifest:
     nan_skips: int
     arms: list[str]
     notes: str = ""
+    # ``git_commit`` alone names a tree the run may not have executed. A dirty
+    # worktree is excluded: the diff is not stored, so ``git_diff_sha256``
+    # cannot be turned back into the code that ran.
+    git_dirty: bool = False
+    git_diff_sha256: str = ""
+    determinism: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return the manifest as plain JSON-compatible data."""
@@ -113,6 +136,53 @@ def spawn_keys_for_seed(seed: int) -> dict[str, int]:
     its streams locally: the manifest and the trainer call the same function.
     """
     return {name: spawn_key(seed, name) for name in STREAMS}
+
+
+@dataclass(frozen=True)
+class GitState:
+    """What ``git_commit`` does and does not describe.
+
+    ``diff_sha256`` is the SHA-256 of the raw bytes of ``git diff HEAD``
+    (staged and unstaged changes to tracked files). Untracked files do not
+    appear in that diff; they still set ``dirty`` via ``git status
+    --porcelain``. A clean tree hashes the empty diff.
+    """
+
+    commit: str
+    dirty: bool
+    diff_sha256: str
+
+
+def capture_git_state(repo_root: str | Path = ".") -> GitState:
+    """Record HEAD, whether the worktree differs from it, and the diff hash.
+
+    A failure (not a repo, git missing, timeout) is recorded as dirty with a
+    non-hash ``diff_sha256`` of ``"unknown"``. That manifest fails completeness
+    and is excluded, which is the safe side: an unreadable tree is not a
+    reproducible one. This function does not raise.
+    """
+    commit = capture_git_commit(repo_root)
+    try:
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=repo_root,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        diff = subprocess.run(
+            ["git", "diff", "HEAD"],
+            cwd=repo_root,
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return GitState(commit, True, "unknown")
+    if status.returncode != 0 or diff.returncode != 0:
+        return GitState(commit, True, "unknown")
+    dirty = bool(status.stdout.strip()) or bool(diff.stdout)
+    return GitState(commit, dirty, hashlib.sha256(diff.stdout).hexdigest())
 
 
 def capture_git_commit(repo_root: str | Path = ".") -> str:
@@ -227,6 +297,31 @@ def validate_completeness(manifest: RunManifest) -> list[str]:
 
     if not manifest.arms:
         problems.append("arms is empty; a run must name at least one arm")
+
+    if not isinstance(manifest.git_dirty, bool):
+        problems.append("git_dirty is not a boolean")
+    elif manifest.git_dirty:
+        # The commit names a tree the process did not run. The diff hash
+        # identifies the patch and does not contain it, so the run cannot be
+        # reproduced from the manifest.
+        problems.append(
+            "git working tree was dirty; git_commit does not describe the "
+            "code and git_diff_sha256 cannot be reproduced from the commit"
+        )
+    if not _is_sha256_hex(manifest.git_diff_sha256):
+        problems.append(
+            "git_diff_sha256 is not a 64-character lowercase hex digest"
+        )
+
+    flags = manifest.determinism
+    if not isinstance(flags, Mapping):
+        problems.append("determinism flags are missing")
+    else:
+        missing_flags = [name for name in DETERMINISM_FIELDS if name not in flags]
+        if missing_flags:
+            problems.append(
+                "determinism is missing flag(s): " + ", ".join(missing_flags)
+            )
 
     return problems
 

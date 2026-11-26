@@ -245,6 +245,56 @@ def test_whiten_handles_constant_input():
     assert torch.isfinite(out).all()
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
+def test_nonzero_block_does_not_leak_future_tokens_on_cuda_bf16():
+    """Real Qwen3-1.7B, bf16, SDPA: perturbing token t+k leaves logits <= t identical.
+
+    Measured on an RTX 3090 with torch 2.6: max absolute difference on the
+    prefix was 0, and the perturbed position itself moved (max abs about
+    9.2). Flash attention refuses a non-null additive mask, so the block's
+    causal mask runs on the mem-efficient, math, or cuDNN SDPA kernel.
+    Those three were also bit-exact in a block-only probe at d_model 2048.
+    A large finite penalty was not required.
+    """
+    from transformers import AutoModelForCausalLM
+
+    from experiments.e1.train import E1Model
+
+    base = AutoModelForCausalLM.from_pretrained(
+        "Qwen/Qwen3-1.7B-Base",
+        dtype=torch.bfloat16,
+        device_map={"": 0},
+    )
+    base.eval()
+    d_model = int(base.config.hidden_size)
+    torch.manual_seed(0)
+    block = JEPABlock(d_model, n_heads=16, zero_init_output=False).to(
+        device="cuda", dtype=torch.bfloat16
+    )
+    with torch.no_grad():
+        block.out.weight.normal_(std=0.02)
+        block.out.bias.normal_(std=0.02)
+    model = E1Model(base, block=block)
+    model.eval()
+    vocab = int(base.config.vocab_size)
+    generator = torch.Generator().manual_seed(0)
+    ids = torch.randint(0, vocab, (2, 32), generator=generator).cuda()
+    t, k = 16, 4
+    perturbed = ids.clone()
+    perturbed[:, t + k] = (perturbed[:, t + k] + 17) % vocab
+    with torch.no_grad():
+        logits = model(ids).logits
+        logits_p = model(perturbed).logits
+    prefix = logits[:, : t + 1]
+    prefix_p = logits_p[:, : t + 1]
+    leak = (prefix.float() - prefix_p.float()).abs()
+    assert torch.equal(prefix, prefix_p)
+    assert float(leak.max()) == 0.0
+    assert not torch.equal(logits[:, t + k], logits_p[:, t + k])
+    del model, block, base
+    torch.cuda.empty_cache()
+
+
 def test_arm_budgets_match_the_protocol_constant():
     """A/B/A'/B'/E/D share TOKENS_PER_RUN, and the docs say the same 30M.
 
@@ -256,9 +306,14 @@ def test_arm_budgets_match_the_protocol_constant():
     assert arms_mod.TOKENS_PER_RUN == 30_000_000
     for name in ("A", "B", "A_prime", "B_prime", "E", "D"):
         assert arms_mod.by_name(name).token_budget == arms_mod.TOKENS_PER_RUN
-    # The assay and the nuisance arm are not that budget.
-    assert arms_mod.by_name("PC_hi").token_budget != arms_mod.TOKENS_PER_RUN
-    assert arms_mod.by_name("N").token_budget != arms_mod.TOKENS_PER_RUN
+    # The assay is 2M. N does not train, so its budget is 0, not 1M and not "—".
+    assert arms_mod.by_name("PC_hi").token_budget == arms_mod.PC_TOKENS
+    assert arms_mod.by_name("PC_lo").token_budget == arms_mod.PC_TOKENS
+    assert arms_mod.PC_TOKENS == 2_000_000
+    assert arms_mod.by_name("N").token_budget == 0
+    dose = next(row for row in arms_mod.schedule_rows() if "dose" in row.pattern)
+    assert dose.token_budget == arms_mod.TOKENS_PER_RUN
+    assert dose.count == 48
 
     root = Path(__file__).resolve().parents[1]
     protocol = (root / "docs" / "PROTOCOL.md").read_text(encoding="utf-8")
@@ -277,6 +332,11 @@ def test_arm_budgets_match_the_protocol_constant():
         line = next(line for line in section.splitlines() if row_id in line)
         assert "30M" in line, line
         assert "10M" not in line, line
+    n_line = next(line for line in section.splitlines() if "`e1/N/s*`" in line)
+    assert "| 0 |" in n_line
+    assert "—" not in n_line
+    pc_line = next(line for line in section.splitlines() if "PChi" in line)
+    assert "2M" in pc_line
 
 
 def test_arm_table_and_parameter_matching():

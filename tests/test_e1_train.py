@@ -210,9 +210,23 @@ def test_run_records_manifest_checkpoint_val_nll_and_collapse(tmp_path):
     result = run(cfg, tiny=True)
     record = result["run_manifest"]
     manifest = RunManifest.from_dict(record)
-    assert validate_completeness(manifest) == []
+    problems = validate_completeness(manifest)
+    # A dirty checkout is excluded because the commit does not describe the
+    # code. Every other completeness check still has to pass.
+    assert [p for p in problems if "dirty" not in p] == []
+    if record["git_dirty"]:
+        assert problems
+    else:
+        assert problems == []
     for name in REQUIRED_FIELDS:
         assert name in record
+    assert isinstance(record["git_dirty"], bool)
+    assert len(record["git_diff_sha256"]) == 64
+    from experiments.protocol.manifest import DETERMINISM_FIELDS
+
+    for name in DETERMINISM_FIELDS:
+        assert name in record["determinism"]
+    assert record["determinism"]["enabled"] is True
     assert len(record["spawn_keys"]) == 6
     assert record["nan_skips"] == 0
     final = Path(record["final_checkpoint"])
@@ -226,6 +240,16 @@ def test_run_records_manifest_checkpoint_val_nll_and_collapse(tmp_path):
     assert result["manifest"]["test_docs"] >= 1
     last = result["train"]["history"][-1]
     assert last["val_nll"] is not None and math.isfinite(last["val_nll"])
+    assert last["val_context_gain"] is not None and math.isfinite(last["val_context_gain"])
+    extension = result["train"]["extension"]
+    assert extension["applied"] is False
+    assert extension["extension_threshold"] == pytest.approx(0.2 * 0.0112)
+    assert extension["val_context_gain_slope_per_mtok"] is not None
+    assert isinstance(extension["exceeds_extension_threshold"], bool)
+    assert last["val_context_gain_slope_per_mtok"] == extension[
+        "val_context_gain_slope_per_mtok"
+    ]
+    assert last["exceeds_extension_threshold"] is extension["exceeds_extension_threshold"]
     assert last["std_z"] is not None and math.isfinite(last["std_z"])
     assert last["effective_rank"] is not None and math.isfinite(last["effective_rank"])
     assert last["var"] is not None and math.isfinite(last["var"])
@@ -297,6 +321,138 @@ def test_eval_set_is_fixed_across_arm_seeds():
         a["manifest"]["eval_fingerprint"]
         == b["manifest"]["eval_fingerprint"]
     )
+
+
+def test_washout_rms_pools_every_clean_batch_and_skips_ablation():
+    """block_fraction is the RMS over every clean eval forward, not the last one."""
+    cfg = _cfg(arm="A", eval_items=2, eval_prefix=8, eval_target=4, context=16)
+    model, _ = build_e1_model(cfg, tiny=True)
+    with torch.no_grad():
+        model.block.out.weight.normal_(std=0.05)
+    model.eval()
+    d_model = int(model.base.config.hidden_size)
+    ids_a = torch.randint(0, 512, (1, 8))
+    ids_b = torch.randint(0, 512, (2, 8))
+    model.begin_washout()
+    with torch.no_grad():
+        model(ids_a)
+        model(ids_b)
+        after_clean = model._wash_count
+        model.block.set_ablation(True)
+        model(ids_a)
+        model.block.set_ablation(False)
+    assert after_clean == (ids_a.numel() + ids_b.numel()) * d_model
+    assert model._wash_count == after_clean
+    stats = model.end_washout()
+    assert stats["block_rms"] > 0.0
+    assert stats["residual_rms"] > 0.0
+
+
+def test_padded_batch_matches_unpadded_logits_on_real_positions():
+    """The block must see the backbone padding mask.
+
+    Left padding sits in the causal past, so a block that ignores the mask
+    lets real tokens attend to it. Right padding is hidden by causality
+    alone and would not catch the bug. Position ids of the real tokens
+    match the unpadded sequence, so a correct mask makes the logits agree.
+    """
+    torch.manual_seed(0)
+    cfg = _cfg(arm="A")
+    base = attach_lora(build_base(cfg, tiny=True), cfg, tiny=True)
+    block = JEPABlock(64, n_heads=8, zero_init_output=False)
+    with torch.no_grad():
+        block.out.weight.normal_(std=0.02)
+        block.out.bias.zero_()
+    model = E1Model(base, block=block)
+    model.eval()
+    seqs = [torch.randint(0, 512, (n,)) for n in (5, 8, 6)]
+    width = max(int(seq.numel()) for seq in seqs)
+    batch = torch.zeros(len(seqs), width, dtype=torch.long)
+    mask = torch.zeros(len(seqs), width, dtype=torch.long)
+    position_ids = torch.zeros(len(seqs), width, dtype=torch.long)
+    for i, seq in enumerate(seqs):
+        n = int(seq.numel())
+        batch[i, width - n :] = seq
+        mask[i, width - n :] = 1
+        position_ids[i, width - n :] = torch.arange(n)
+    with torch.no_grad():
+        alone = [model(seq.view(1, -1)).logits[0] for seq in seqs]
+        padded = model(batch, attention_mask=mask, position_ids=position_ids).logits
+        leaked = model(batch, position_ids=position_ids).logits
+    for i, seq in enumerate(seqs):
+        n = int(seq.numel())
+        real = slice(width - n, width)
+        # ~1e-7 is the explicit-mask kernel versus the unpadded is_causal
+        # kernel, not a padding leak. Dropping the mask moves logits by
+        # tenths on any row that actually contains padding.
+        assert torch.allclose(padded[i, real], alone[i], atol=1e-5, rtol=1e-5)
+        if n < width:
+            gap = (leaked[i, real] - alone[i]).abs().max()
+            assert float(gap) > 1e-1
+
+
+def test_cli_default_tokens_match_every_arm_budget():
+    from experiments.e1.arms import all_arms, resolve_token_budget
+    from experiments.e1.train import build_arg_parser
+
+    parser = build_arg_parser()
+    for arm in all_arms():
+        args = parser.parse_args(["--arm", arm.name])
+        assert args.tokens is None
+        tokens, warning = resolve_token_budget(arm.name, args.tokens)
+        assert warning is None
+        assert tokens == arm.token_budget
+
+
+def test_token_override_warns_when_it_differs_from_the_arm_budget():
+    from experiments.e1.arms import resolve_token_budget
+
+    tokens, warning = resolve_token_budget("A", 2_000_000)
+    assert tokens == 2_000_000
+    assert warning is not None
+    assert "WARNING" in warning
+    assert "30000000" in warning
+
+
+def _repeat_eval(device: str, dtype: str, tmp_path: Path):
+    def once(tag: str):
+        cfg = _cfg(
+            arm="D",
+            seed=0,
+            tokens=128,
+            context=16,
+            batch_size=1,
+            grad_accum=1,
+            eval_items=2,
+            eval_prefix=8,
+            eval_target=4,
+            device=device,
+            dtype=dtype,
+            log_every=10,
+            checkpoint_dir=str(tmp_path / tag),
+            deterministic=True,
+        )
+        return run(cfg, tiny=True)
+
+    first = once("a")
+    second = once("b")
+    assert first["eval"]["context_gain_per_item"] == second["eval"]["context_gain_per_item"]
+    assert first["train"]["history"][-1]["lm"] == second["train"]["history"][-1]["lm"]
+    return first, second
+
+
+def test_determinism_mode_repeats_eval_on_cpu(tmp_path):
+    _repeat_eval("cpu", "float32", tmp_path)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA determinism probe")
+def test_determinism_mode_repeats_eval_on_cuda(tmp_path):
+    """Same arm, same seed, determinism mode, two runs, identical per-item P1.
+
+    The tiny Qwen3 backbone is what this test can afford inside the suite.
+    The real 1.7B bf16 measurement is in the trainer module docstring.
+    """
+    _repeat_eval("cuda", "bfloat16", tmp_path)
 
 
 def _load(cfg: TrainConfig):

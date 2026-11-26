@@ -12,7 +12,11 @@ are skipped, which makes the driver resumable.
 Usage::
 
     PYTHONPATH=src .venv/bin/python -m experiments.e1.pilot \
-        --tokens 2000000 --max-docs 4000 --out-dir artifacts/e1/pilot
+        --max-docs 4000 --out-dir artifacts/e1/pilot
+
+Each arm's token count defaults to its arm-table budget. ``--tokens``
+overrides every arm and warns when that override disagrees with the table.
+The voided 2026-11-20 pilot was launched with one shared ``--tokens``.
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from experiments.e1.arms import resolve_token_budget  # noqa: E402
 from experiments.protocol.stats import pilot_sd_inflation, required_n  # noqa: E402
 
 # The pilot plan. A and B get more seeds because their paired difference is the
@@ -47,12 +52,18 @@ DEFAULT_PLAN: dict[str, list[int]] = {
 }
 
 
-def _run_one(
+def train_command(
     arm: str,
     seed: int,
     args: argparse.Namespace,
     out_path: Path,
-) -> None:
+) -> list[str]:
+    """The ``experiments.e1.train`` invocation for one pilot cell.
+
+    ``--tokens`` is omitted when the pilot was not given an override, so
+    the trainer uses that arm's own budget. A shared override is forwarded
+    and the trainer prints the mismatch warning.
+    """
     cmd = [
         sys.executable,
         "-m",
@@ -61,8 +72,6 @@ def _run_one(
         arm,
         "--seed",
         str(seed),
-        "--tokens",
-        str(args.tokens),
         "--context",
         str(args.context),
         "--batch-size",
@@ -90,14 +99,28 @@ def _run_one(
         "--out",
         str(out_path),
     ]
+    if args.tokens is not None:
+        cmd.extend(["--tokens", str(args.tokens)])
     if args.max_docs is not None:
         cmd += ["--max-docs", str(args.max_docs)]
     if args.max_tokens is not None:
         cmd += ["--max-tokens", str(args.max_tokens)]
     if args.layer is not None:
         cmd += ["--layer", str(args.layer)]
+    return cmd
+
+
+def _run_one(
+    arm: str,
+    seed: int,
+    args: argparse.Namespace,
+    out_path: Path,
+) -> None:
+    _, warning = resolve_token_budget(arm, args.tokens)
+    if warning:
+        print(warning, file=sys.stderr, flush=True)
     print(f"[pilot] {arm} seed={seed} -> {out_path}", flush=True)
-    subprocess.run(cmd, check=True)
+    subprocess.run(train_command(arm, seed, args, out_path), check=True)
 
 
 def _load(out_dir: Path, arm: str, seed: int) -> dict:
@@ -183,9 +206,14 @@ def summarise(
     return results
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--tokens", type=int, default=2_000_000)
+    p.add_argument(
+        "--tokens",
+        type=int,
+        default=None,
+        help="override every arm's token budget (default: each arm's own budget)",
+    )
     p.add_argument("--context", type=int, default=512)
     p.add_argument("--batch-size", type=int, default=2)
     p.add_argument("--grad-accum", type=int, default=4)
@@ -205,7 +233,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--arms", default=None, help="comma-separated subset")
     p.add_argument("--seeds", default=None, help="comma-separated, overrides plan")
     p.add_argument("--out-dir", default="artifacts/e1/pilot")
-    args = p.parse_args(argv)
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_arg_parser().parse_args(argv)
 
     plan = {k: list(v) for k, v in DEFAULT_PLAN.items()}
     if args.arms:

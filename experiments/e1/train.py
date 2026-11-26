@@ -20,21 +20,102 @@ Evaluation returns the two pre-registered endpoints:
 ``P3`` necessity = ``P1(normal) - P1(block ablated)``.
 
 Everything is seeded through :mod:`experiments.protocol.seeds`, so arms do not
-share or shift each other's data order.
+share or shift each other's data order. The default token count is that arm's
+``token_budget``; ``--tokens`` is an override and prints a warning when it
+disagrees with the arm table.
+
+Determinism
+-----------
+
+Measured on this host, not inferred. Card: NVIDIA GeForce RTX 3090. Software:
+torch 2.6.0+cu124, transformers 5.12.1, ``Qwen/Qwen3-1.7B-Base``, bf16, SDPA.
+Two fresh processes, determinism flags **off** (cuDNN TF32 was on, matmul
+TF32 was already off, ``torch.use_deterministic_algorithms`` was off):
+
+* Arm D, seed 0, context 32, batch 1, 2 steps. Final per-step losses
+  ``[2.484375, 3.59375]``, both per-item context gains
+  ``[2.1669564247131348, 3.0992536544799805]``, and the SHA-256 of every
+  trainable parameter matched. ``torch.equal`` on
+  ``layers.0`` ``q_proj`` ``lora_B`` was true.
+* The same arm and seed, context 128, batch 2, 1 step. Loss ``2.625``, both
+  per-item gains, and every trainable-parameter hash matched.
+  ``torch.equal`` on ``layers.14`` ``q_proj`` ``lora_B`` was true.
+* Arm D and arm ``PC_hi``, seed 0, context 32, batch 1, 2 steps, were
+  bitwise identical to each other, including those eval arrays. The only
+  arm-name branches that change the function are ``cfg.arm == "N"`` (the
+  block is a frozen random nonlinearity, not zero-init) and
+  ``cfg.arm == "PC_lo"`` (learning rate 0). ``PC_hi`` is not special-cased.
+  The 0.00287 D-versus-``PC_hi`` gap in the voided 2026-11-20 pilot is not
+  a wiring difference in this harness.
+
+Repeat noise on those repeats is **0 nats/token**, which is 0 of the
+planning MPID 0.0112. A one-step bf16 train with
+``torch.use_deterministic_algorithms(True)`` and TF32 off completed and
+reproduced the unflagged context-32 loss ``2.484375``.
+
+What this does **not** establish, and what determinism mode does not fix:
+
+* Context 512 (the confirmatory shape), gradient accumulation greater than
+  1, and a 30M-token run were not re-measured. The card was shared; those
+  shapes were not run. Bitwise identity at context 128 does not by itself
+  certify a different GEMM size.
+* Flash attention rejects a non-null additive mask, so the block's causal
+  mask never runs on flash. The backbone can skip materialising a mask and
+  call SDPA with ``is_causal``. That path was inside the measured steps and
+  did not move a bit. PyTorch documents some fused attention *backward*
+  kernels as using atomic adds. This build did not diverge at the shapes
+  above, and there is no second, "deterministic flash" kernel to switch to
+  when flash is the one SDPA selects. Determinism mode enables
+  ``torch.use_deterministic_algorithms(True)`` without ``warn_only``. An op
+  with no deterministic implementation will raise rather than silently
+  diverge. That was not observed on the one-step probe.
+* ``CUBLAS_WORKSPACE_CONFIG=:4096:8`` is set at import, before ``torch`` is
+  imported, because cublas reads it when the library loads. Importing this
+  module after a CUDA GEMM has already run does not retroactively make that
+  process's cublas deterministic. The manifest records the variable's value,
+  not a claim that cublas honoured it.
+* bf16 is not real arithmetic. A repeatable run is the same rounding twice,
+  not an fp32 result. ``F.cross_entropy`` on bf16 logits is left to PyTorch's
+  kernel (the CUDA loss accumulates the log-softmax in fp32). That is
+  recorded, not replaced.
+* The ``dropout`` spawn key is recorded and not consumed. ``lora_dropout``
+  and the block dropout default to 0, so no dropout mask is drawn. A
+  non-zero dropout would use the global torch RNG after the ``lora_init``
+  reseed, which is not the ``dropout`` stream.
+* ``PYTHONHASHSEED`` cannot be changed after the interpreter starts. The
+  training loop does not depend on set iteration order.
+
+``--deterministic`` (the default) seeds Python's ``random``, the legacy
+numpy RNG, torch, and CUDA from the run seed, then re-seeds torch from
+``spawn_key(seed, "lora_init")`` before LoRA construction so the adapter
+init stays on the protocol stream. The data stream is a numpy
+``Generator`` from ``spawn_key(seed, "data")`` and is the only consumer of
+that key: each row of :meth:`PackedCorpus.train_batch` draws a document
+index and then a start offset, in that order. Block and head init re-seed
+from their own spawn keys and only run on arms that build those modules.
 
 Usage (from the repository root)::
 
-    PYTHONPATH=src .venv/bin/python -m experiments.e1.train \
-        --arm A --seed 0 --tokens 2000000 \
-        --corpus data/corpus_v2.txt \
+    PYTHONPATH=src .venv/bin/python -m experiments.e1.train \\
+        --arm A --seed 0 \\
+        --corpus data/corpus_v2.txt \\
         --out artifacts/e1/A_seed0.json
 
+The token count defaults to ``by_name(arm).token_budget`` (30M for A).
 Use ``--tiny`` for a CPU smoke test that never downloads a model.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
+import random
+
+# cublas reads this when it loads. It has to be set before ``import torch``
+# in a fresh ``python -m experiments.e1.train`` process. See the module
+# docstring: a process that already ran a CUDA GEMM will not pick it up.
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
 import json
 import math
 import sys
@@ -50,7 +131,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from experiments.e1.arms import by_name, build_head  # noqa: E402
+from experiments.e1.arms import by_name, build_head, resolve_token_budget  # noqa: E402
 from experiments.e1.block import JEPABlock  # noqa: E402
 from experiments.e1.data import PackedCorpus, target_labels  # noqa: E402
 from experiments.e1.objective import (  # noqa: E402
@@ -59,13 +140,25 @@ from experiments.e1.objective import (  # noqa: E402
     representation_stats,
 )
 from experiments.protocol.manifest import (  # noqa: E402
+    DETERMINISM_FIELDS,
     RunManifest,
-    capture_git_commit,
+    capture_git_state,
     hash_config,
     spawn_keys_for_seed,
 )
 from experiments.protocol.qualify import NanCounter, microbatch_nonfinite  # noqa: E402
 from experiments.protocol.seeds import spawn_key, token_stream_sha256  # noqa: E402
+
+#: Planning MPID, docs/PROTOCOL.md §5.4. The extension rule compares the
+#: dev context-gain slope against ``0.2 *`` this, per 1M tokens. The slope
+#: is reported. It does not extend a run: extending some arms and not others
+#: is optional stopping, and the protocol requires all arms or none.
+MPID_NATS_PER_TOKEN = 0.0112
+EXTENSION_SLOPE_PER_MTOK = 0.2 * MPID_NATS_PER_TOKEN
+
+#: Dev items used for the slope diagnostic. Not the sealed test set, and not
+#: a second endpoint. Small on purpose so a log interval stays a log interval.
+N_SLOPE_ITEMS = 8
 
 # Arm -> (block, jepa, head, target_mode). ``by_name`` owns the protocol table;
 # this map only says how each role is wired.
@@ -77,6 +170,9 @@ _ARM_WIRING: dict[str, dict[str, object]] = {
     "E": {"block": True, "jepa": True, "head": False, "scramble": True},
     "D": {"block": False, "jepa": False, "head": False, "scramble": False},
     "N": {"block": True, "jepa": False, "head": False, "scramble": False},
+    # PC_hi is the same wiring as D. The learning-rate branch below is the
+    # only numeric special case, and it names PC_lo, not PC_hi. Checked
+    # bitwise on GPU: see the module docstring.
     "PC_hi": {"block": False, "jepa": False, "head": False, "scramble": False},
     "PC_lo": {"block": False, "jepa": False, "head": False, "scramble": False},
 }
@@ -87,7 +183,10 @@ class TrainConfig:
     model_id: str = "Qwen/Qwen3-1.7B-Base"
     arm: str = "A"
     seed: int = 0
-    tokens: int = 2_000_000
+    # ``None`` means "this arm's token_budget". A literal is an override.
+    # The old literal default of 2_000_000 is what trained the 30M cells for
+    # 2M tokens in the voided pilot.
+    tokens: int | None = None
     context: int = 512
     batch_size: int = 2
     grad_accum: int = 4
@@ -130,6 +229,13 @@ class TrainConfig:
     # selection; choosing one by its score is optional stopping.
     checkpoint_every: int = 500
     checkpoint_dir: str = "artifacts/e1/checkpoints"
+    # Pins seeds and kernel flags. See the module docstring for what was
+    # actually measured, and for what this flag cannot make deterministic.
+    deterministic: bool = True
+
+    def __post_init__(self) -> None:
+        if self.tokens is None:
+            self.tokens = by_name(self.arm).token_budget
 
 
 # --------------------------------------------------------------------------
@@ -182,29 +288,66 @@ class E1Model(torch.nn.Module):
             )
         self.layer_index = int(layer_index)
         self._teacher_mode = False
-        self._stats: dict[str, float] = {}
+        # The 2D padding mask from the backbone forward (1 = real token).
+        # The decoder layer is called with a 4D causal mask, which is not
+        # this tensor; the hook reads the mask stashed here.
+        self._padding_mask: torch.Tensor | None = None
+        # Washout sums across every clean eval forward. The last batch alone
+        # is not the RMS the protocol names.
+        self._collect_washout = False
+        self._wash_block_sq = 0.0
+        self._wash_resid_sq = 0.0
+        self._wash_count = 0
         self._handle = layers[self.layer_index].register_forward_hook(self._hook)
 
     def remove_hooks(self) -> None:
         self._handle.remove()
 
+    def begin_washout(self) -> None:
+        """Start pooling block and residual energy over clean eval forwards."""
+        self._wash_block_sq = 0.0
+        self._wash_resid_sq = 0.0
+        self._wash_count = 0
+        self._collect_washout = True
+
+    def end_washout(self) -> dict[str, float]:
+        """Stop pooling and return RMS over every clean forward since begin.
+
+        An empty pool (no block, or no clean forward) returns ``{}``. The
+        RMS is ``sqrt(sum of squares / count)`` over the concatenated
+        positions, not the mean of per-batch RMS values.
+        """
+        self._collect_washout = False
+        if self._wash_count <= 0:
+            return {}
+        return {
+            "block_rms": math.sqrt(self._wash_block_sq / self._wash_count),
+            "residual_rms": math.sqrt(self._wash_resid_sq / self._wash_count),
+        }
+
     def _hook(self, module, args, output):  # noqa: ANN001 - torch API
         hidden = output[0] if isinstance(output, tuple) else output
         if self.block is not None and not self._teacher_mode:
-            delta = self.block(hidden)
-            # The washout diagnostic is the block's contribution on a *clean*
-            # forward. ``evaluate`` then ablates the block and forwards again;
-            # writing stats on that second pass stores the zero contribution
-            # and every run reports block_fraction 0. An ablated forward must
-            # leave the last clean measurement in place.
-            if not self.training and not self.block._ablated:
+            # ``_padding_mask`` is the backbone's (B, T) mask. Without it the
+            # block lets real tokens attend to padding. Training windows are
+            # dense; a padded eval batch is not.
+            delta = self.block(hidden, attention_mask=self._padding_mask)
+            # The washout diagnostic is the block's contribution on clean
+            # forwards only. ``evaluate`` ablates the block and forwards
+            # again; an ablated forward must not add its zero contribution
+            # into the pool, and the pool must cover every clean batch, not
+            # the last one.
+            if (
+                not self.training
+                and self._collect_washout
+                and not self.block._ablated
+            ):
                 with torch.no_grad():
-                    self._stats["block_rms"] = float(
-                        delta.detach().pow(2).mean().sqrt()
-                    )
-                    self._stats["residual_rms"] = float(
-                        hidden.detach().pow(2).mean().sqrt()
-                    )
+                    d = delta.detach().float()
+                    h = hidden.detach().float()
+                    self._wash_block_sq += float(d.pow(2).sum())
+                    self._wash_resid_sq += float(h.pow(2).sum())
+                    self._wash_count += int(d.numel())
             hidden = hidden + delta
             if isinstance(output, tuple):
                 return (hidden,) + tuple(output[1:])
@@ -212,27 +355,50 @@ class E1Model(torch.nn.Module):
         return output
 
     def forward(
-        self, input_ids: torch.Tensor, *, teacher: bool = False, **kwargs
+        self,
+        input_ids: torch.Tensor,
+        *,
+        teacher: bool = False,
+        attention_mask: torch.Tensor | None = None,
+        **kwargs,
     ):
         """Run one forward pass and return the raw model output.
 
         ``teacher=True`` disables the adapter and the block contribution. It is
         wrapped in ``no_grad`` because the teacher is never differentiated.
+
+        ``attention_mask`` is the backbone's ``(batch, time)`` padding mask,
+        1 for a real token and 0 for padding. It is forwarded to the base
+        model and, via the hook, to the inserted block. The 4D causal mask
+        the decoder layer builds internally is a different tensor and is not
+        accepted here.
         """
+        if attention_mask is not None and attention_mask.ndim != 2:
+            raise ValueError(
+                "attention_mask must be the (B, T) padding mask (1 = real "
+                f"token); got shape {tuple(attention_mask.shape)}"
+            )
         self._teacher_mode = teacher
+        self._padding_mask = attention_mask
         call = dict(
             input_ids=input_ids,
             output_hidden_states=True,
             use_cache=False,
             **kwargs,
         )
-        if teacher and hasattr(self.base, "disable_adapter"):
-            with self.base.disable_adapter(), torch.no_grad():
-                return self.base(**call)
-        if teacher:
-            with torch.no_grad():
-                return self.base(**call)
-        return self.base(**call)
+        if attention_mask is not None:
+            call["attention_mask"] = attention_mask
+        try:
+            if teacher and hasattr(self.base, "disable_adapter"):
+                with self.base.disable_adapter(), torch.no_grad():
+                    return self.base(**call)
+            if teacher:
+                with torch.no_grad():
+                    return self.base(**call)
+            return self.base(**call)
+        finally:
+            self._teacher_mode = False
+            self._padding_mask = None
 
     # -- state extraction ---------------------------------------------------
 
@@ -336,6 +502,8 @@ def build_e1_model(
 
     model = E1Model(base, block=block, head=head, layer_index=cfg.layer)
     model.to(cfg.device)
+    if tiny and cfg.dtype == "bfloat16":
+        model.to(dtype=torch.bfloat16)
     return model, None
 
 
@@ -517,6 +685,8 @@ def train(
         raise ValueError(
             f"checkpoint_every must be positive, got {cfg.checkpoint_every}"
         )
+    # PC_lo is the only arm whose learning rate is not ``cfg.lr``. D and
+    # PC_hi both take this branch with the configured rate.
     lr = 0.0 if cfg.arm == "PC_lo" else cfg.lr
 
     params = model.trainable_parameters()
@@ -528,6 +698,7 @@ def train(
     n_steps = _n_steps(cfg)
     tokens_seen = 0
     history: list[dict] = []
+    dev_items = _slope_items(cfg, dev_corpus)
     started = time.time()
     model.train()
     nan_counter = NanCounter()
@@ -634,6 +805,9 @@ def train(
                 if dev_corpus is not None
                 else None
             )
+            val_cg = (
+                mean_context_gain(cfg, model, dev_items) if dev_items else None
+            )
             rec = {
                 "step": global_step,
                 "lm": step_lm / denom,
@@ -645,6 +819,7 @@ def train(
                     None if step_stats is None else step_stats["effective_rank"]
                 ),
                 "val_nll": val_nll,
+                "val_context_gain": val_cg,
                 "tokens": tokens_seen,
                 "seconds": round(time.time() - started, 2),
                 "nan_skips": nan_counter.total,
@@ -662,6 +837,8 @@ def train(
                 )
             if val_nll is not None:
                 extra += f" val_nll={val_nll:.4f}"
+            if val_cg is not None:
+                extra += f" val_cg={val_cg:.4f}"
             print(
                 f"[{cfg.arm} s{cfg.seed}] step {global_step}/{n_steps} "
                 f"lm={rec['lm']:.4f}{extra} tokens={tokens_seen}",
@@ -674,6 +851,16 @@ def train(
         model, _checkpoint_root(cfg) / "final", step=global_step
     )
     elapsed = time.time() - started
+    # Reported only. A slope past the threshold does not add steps: the
+    # protocol extends every arm or none, which is a decision for a person.
+    extension = context_gain_slope(history)
+    if history:
+        history[-1]["val_context_gain_slope_per_mtok"] = extension[
+            "val_context_gain_slope_per_mtok"
+        ]
+        history[-1]["exceeds_extension_threshold"] = extension[
+            "exceeds_extension_threshold"
+        ]
     return {
         "steps": global_step,
         "tokens_seen": tokens_seen,
@@ -684,12 +871,90 @@ def train(
         "history": history,
         "nan_skips": nan_counter.total,
         "final_checkpoint": str(final_checkpoint),
+        "extension": extension,
     }
 
 
 # --------------------------------------------------------------------------
 # Evaluation
 # --------------------------------------------------------------------------
+
+
+def _slope_items(cfg: TrainConfig, dev_corpus: PackedCorpus | None):
+    """A fixed dev subset for the extension-slope diagnostic.
+
+    The sealed test split is not read. The draw is keyed by ``split_seed``,
+    not the run seed, so every arm is scored on the same items. Too few
+    documents, or documents shorter than the eval span, yields an empty
+    list and the slope is reported as unavailable.
+    """
+    if dev_corpus is None:
+        return []
+    n_items = min(N_SLOPE_ITEMS, max(int(cfg.eval_items), 1))
+    try:
+        return dev_corpus.eval_items(
+            n_items,
+            prefix=cfg.eval_prefix,
+            target=cfg.eval_target,
+            seed=cfg.split_seed,
+        )
+    except ValueError:
+        return []
+
+
+def context_gain_slope(history: list[dict]) -> dict:
+    """Least-squares slope of val context gain against tokens, per 1M tokens.
+
+    Fewer than two finite points leaves the slope ``None``. ``exceeds`` is
+    true only when the slope is greater than ``0.2 × MPID`` per 1M tokens,
+    which is the protocol's extension rule. Nothing here changes the step
+    count.
+    """
+    points = [
+        (float(row["tokens"]), float(row["val_context_gain"]))
+        for row in history
+        if row.get("val_context_gain") is not None
+        and row.get("tokens") is not None
+    ]
+    report = {
+        "val_context_gain_slope_per_mtok": None,
+        "extension_threshold": EXTENSION_SLOPE_PER_MTOK,
+        "exceeds_extension_threshold": None,
+        "n_points": len(points),
+        "applied": False,
+    }
+    if len(points) < 2:
+        return report
+    x = np.asarray([p[0] for p in points], dtype=float)
+    y = np.asarray([p[1] for p in points], dtype=float)
+    centred = x - x.mean()
+    variance = float((centred ** 2).sum())
+    slope = 0.0 if variance == 0.0 else float((centred * (y - y.mean())).sum() / variance)
+    per_mtok = slope * 1_000_000.0
+    report["val_context_gain_slope_per_mtok"] = per_mtok
+    report["exceeds_extension_threshold"] = bool(per_mtok > EXTENSION_SLOPE_PER_MTOK)
+    return report
+
+
+def _collate_token_rows(
+    rows: list[list[int]], device: str
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Stack equal-length rows, or right-pad and return a 1/0 mask.
+
+    A mask is returned only when some row is shorter than the batch. An
+    all-ones mask would force the backbone to materialise a dense causal
+    mask and change the SDPA kernel on a batch that has no padding.
+    """
+    lengths = [len(row) for row in rows]
+    if len(set(lengths)) == 1:
+        return torch.tensor(rows, dtype=torch.long, device=device), None
+    width = max(lengths)
+    batch = torch.zeros(len(rows), width, dtype=torch.long, device=device)
+    mask = torch.zeros(len(rows), width, dtype=torch.long, device=device)
+    for i, row in enumerate(rows):
+        batch[i, : len(row)] = torch.tensor(row, dtype=torch.long, device=device)
+        mask[i, : len(row)] = 1
+    return batch, mask
 
 
 def masked_nll(logits: torch.Tensor, labels: torch.Tensor) -> float:
@@ -701,6 +966,48 @@ def masked_nll(logits: torch.Tensor, labels: torch.Tensor) -> float:
     safe = labels.clamp_min(0)
     token = logp.gather(-1, safe.unsqueeze(-1)).squeeze(-1)
     return float(-(token * valid).sum() / valid.sum())
+
+
+@torch.no_grad()
+def mean_context_gain(cfg: TrainConfig, model: E1Model, items) -> float:
+    """Mean dev context gain. Does not ablate and does not touch washout."""
+    was_training = model.training
+    model.eval()
+    try:
+        gains: list[float] = []
+        for start in range(0, len(items), cfg.eval_batch):
+            batch = items[start : start + cfg.eval_batch]
+            true_ids, true_mask = _collate_token_rows(
+                [it.true_ids for it in batch], cfg.device
+            )
+            shuf_ids, shuf_mask = _collate_token_rows(
+                [it.shuffled_ids for it in batch], cfg.device
+            )
+            labels, _ = _collate_token_rows(
+                [target_labels(it.true_ids, it.target_start) for it in batch],
+                cfg.device,
+            )
+            if true_mask is not None:
+                # Padded label positions are not targets. ``_collate`` writes
+                # 0 into the pad, and 0 is a valid token id.
+                labels = labels.masked_fill(true_mask == 0, -100)
+            nll_true = [
+                masked_nll(model(true_ids, attention_mask=true_mask).logits[row], labels[row])
+                for row in range(true_ids.size(0))
+            ]
+            nll_shuf = [
+                masked_nll(model(shuf_ids, attention_mask=shuf_mask).logits[row], labels[row])
+                for row in range(shuf_ids.size(0))
+            ]
+            gains.extend(
+                float(g)
+                for g in context_gain(torch.tensor(nll_true), torch.tensor(nll_shuf))
+            )
+        if not gains:
+            raise ValueError("no dev items to score")
+        return float(np.mean(gains))
+    finally:
+        model.train(was_training)
 
 
 @torch.no_grad()
@@ -717,55 +1024,55 @@ def evaluate(
     nll_true_all: list[float] = []
     nll_shuf_all: list[float] = []
     ablated_gains: list[float] = []
-    # Snapshot of the last *clean* forward. The ablated re-forward must not
-    # be what the washout diagnostic reports.
-    clean_stats: dict[str, float] = {}
-
-    for start in range(0, len(items), cfg.eval_batch):
-        batch = items[start : start + cfg.eval_batch]
-        true_ids = torch.tensor(
-            [it.true_ids for it in batch], dtype=torch.long, device=cfg.device
-        )
-        shuf_ids = torch.tensor(
-            [it.shuffled_ids for it in batch], dtype=torch.long, device=cfg.device
-        )
-        labels = torch.tensor(
-            [target_labels(it.true_ids, it.target_start) for it in batch],
-            dtype=torch.long,
-            device=cfg.device,
-        )
-
-        def nll_for(ids: torch.Tensor) -> list[float]:
-            out = model(ids)
-            return [
-                masked_nll(out.logits[row], labels[row])
-                for row in range(ids.size(0))
-            ]
-
-        nll_true = nll_for(true_ids)
-        nll_shuf = nll_for(shuf_ids)
-        if model.block is not None and not model.block._ablated and model._stats:
-            clean_stats = dict(model._stats)
-        gains.extend(
-            float(g) for g in context_gain(
-                torch.tensor(nll_true), torch.tensor(nll_shuf)
+    if model.block is not None:
+        model.begin_washout()
+    try:
+        for start in range(0, len(items), cfg.eval_batch):
+            batch = items[start : start + cfg.eval_batch]
+            true_ids, true_mask = _collate_token_rows(
+                [it.true_ids for it in batch], cfg.device
             )
-        )
-        nll_true_all.extend(nll_true)
-        nll_shuf_all.extend(nll_shuf)
+            shuf_ids, shuf_mask = _collate_token_rows(
+                [it.shuffled_ids for it in batch], cfg.device
+            )
+            labels, _ = _collate_token_rows(
+                [target_labels(it.true_ids, it.target_start) for it in batch],
+                cfg.device,
+            )
+            if true_mask is not None:
+                labels = labels.masked_fill(true_mask == 0, -100)
 
-        if has_block and model.block is not None:
-            model.block.set_ablation(True)
-            try:
-                ab_true = nll_for(true_ids)
-                ab_shuf = nll_for(shuf_ids)
-            finally:
-                model.block.set_ablation(False)
-            ablated_gains.extend(
+            def nll_for(ids: torch.Tensor, mask: torch.Tensor | None) -> list[float]:
+                out = model(ids, attention_mask=mask)
+                return [
+                    masked_nll(out.logits[row], labels[row])
+                    for row in range(ids.size(0))
+                ]
+
+            nll_true = nll_for(true_ids, true_mask)
+            nll_shuf = nll_for(shuf_ids, shuf_mask)
+            gains.extend(
                 float(g) for g in context_gain(
-                    torch.tensor(ab_true), torch.tensor(ab_shuf)
+                    torch.tensor(nll_true), torch.tensor(nll_shuf)
                 )
             )
+            nll_true_all.extend(nll_true)
+            nll_shuf_all.extend(nll_shuf)
+
+            if has_block and model.block is not None:
+                model.block.set_ablation(True)
+                try:
+                    ab_true = nll_for(true_ids, true_mask)
+                    ab_shuf = nll_for(shuf_ids, shuf_mask)
+                finally:
+                    model.block.set_ablation(False)
+                ablated_gains.extend(
+                    float(g) for g in context_gain(
+                        torch.tensor(ab_true), torch.tensor(ab_shuf)
+                    )
+                )
+    finally:
+        clean_stats = model.end_washout() if model.block is not None else {}
 
     gains_arr = np.asarray(gains, dtype=float)
     result: dict = {
@@ -791,10 +1098,9 @@ def evaluate(
                 "necessity_per_item": necessity.tolist(),
             }
         )
-        # Washout diagnostic: if the block's contribution is a tiny fraction of
-        # the residual, a null means "washed out", not "unhelpful". Read the
-        # snapshot taken before ablation, not the live stats the ablated
-        # forward would have overwritten.
+        # Washout diagnostic: block-output RMS as a fraction of residual RMS,
+        # pooled over every clean eval forward. A null with a fraction under
+        # 1% means "washed out", not "unhelpful".
         if "block_rms" in clean_stats and "residual_rms" in clean_stats:
             result["block_rms"] = clean_stats["block_rms"]
             result["residual_rms"] = clean_stats["residual_rms"]
@@ -821,11 +1127,69 @@ def _peak_vram_gb(device: str) -> float:
     return 0.0
 
 
+def configure_determinism(enabled: bool) -> dict:
+    """Apply kernel flags when ``enabled``, then return the flags in force.
+
+    The returned dict is what the manifest stores. It is the state after
+    the call, so a run that asked for determinism and a run that did not
+    are distinguishable. See the module docstring for which of these flags
+    were measured to produce bitwise repeats, and which cannot.
+    """
+    if enabled:
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        torch.set_float32_matmul_precision("highest")
+        # ``warn_only=False``: an op with no deterministic kernel raises.
+        # A warning would let the run continue on a nondeterministic kernel
+        # and the manifest would still say determinism was on.
+        torch.use_deterministic_algorithms(True, warn_only=False)
+    flags = {
+        "enabled": bool(enabled),
+        "deterministic_algorithms": bool(torch.are_deterministic_algorithms_enabled()),
+        "deterministic_algorithms_warn_only": bool(
+            torch.is_deterministic_algorithms_warn_only_enabled()
+        ),
+        "cudnn_deterministic": bool(torch.backends.cudnn.deterministic),
+        "cudnn_benchmark": bool(torch.backends.cudnn.benchmark),
+        "matmul_allow_tf32": bool(torch.backends.cuda.matmul.allow_tf32),
+        "cudnn_allow_tf32": bool(torch.backends.cudnn.allow_tf32),
+        "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+        "float32_matmul_precision": torch.get_float32_matmul_precision(),
+    }
+    missing = [name for name in DETERMINISM_FIELDS if name not in flags]
+    if missing:
+        raise RuntimeError("determinism flags drifted from the manifest schema: " + ", ".join(missing))
+    return flags
+
+
+def seed_process(seed: int) -> None:
+    """Seed the process-global RNGs from the run seed.
+
+    Spawn-keyed streams are seeded separately. ``torch.manual_seed`` also
+    seeds CUDA, and ``manual_seed_all`` is called as well so a later reader
+    can see the call. The legacy numpy seed is 32-bit; the data stream does
+    not use it.
+    """
+    random.seed(seed)
+    np.random.seed(seed % (2**32))
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
 def run(cfg: TrainConfig, *, tiny: bool = False, tokenizer=None) -> dict:
     started = time.perf_counter()
+    determinism = configure_determinism(cfg.deterministic)
+    seed_process(cfg.seed)
     if cfg.device.startswith("cuda") and torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
-    torch.manual_seed(spawn_key(cfg.seed, "lora_init"))
+    lora_seed = spawn_key(cfg.seed, "lora_init")
+    torch.manual_seed(lora_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(lora_seed)
     model, _ = build_e1_model(cfg, tiny=tiny)
     if not tiny:
         from transformers import AutoTokenizer
@@ -857,9 +1221,10 @@ def run(cfg: TrainConfig, *, tiny: bool = False, tokenizer=None) -> dict:
     )
     eval_metrics = evaluate(cfg, model, eval_items, tiny=tiny)
     wall_clock_s = time.perf_counter() - started
+    git_state = capture_git_state(_REPO_ROOT)
     record = RunManifest(
         run_id=f"e1/{cfg.arm}/s{cfg.seed}",
-        git_commit=capture_git_commit(_REPO_ROOT),
+        git_commit=git_state.commit,
         config_sha256=hash_config(asdict(cfg)),
         corpus_sha256=_corpus_sha256(train_corpus),
         spawn_keys=spawn_keys_for_seed(cfg.seed),
@@ -870,6 +1235,9 @@ def run(cfg: TrainConfig, *, tiny: bool = False, tokenizer=None) -> dict:
         nan_skips=int(train_metrics["nan_skips"]),
         arms=[cfg.arm],
         notes=f"arm={cfg.arm} seed={cfg.seed}",
+        git_dirty=git_state.dirty,
+        git_diff_sha256=git_state.diff_sha256,
+        determinism=determinism,
     )
     return {
         "config": asdict(cfg),
@@ -903,11 +1271,16 @@ def run(cfg: TrainConfig, *, tiny: bool = False, tokenizer=None) -> dict:
     }
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--arm", default="A", choices=list(_ARM_WIRING))
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--tokens", type=int, default=2_000_000)
+    p.add_argument(
+        "--tokens",
+        type=int,
+        default=None,
+        help="override the arm-table token budget (default: by_name(arm).token_budget)",
+    )
     p.add_argument("--model", default="Qwen/Qwen3-1.7B-Base")
     p.add_argument("--corpus", default="data/corpus_v2.txt")
     p.add_argument("--context", type=int, default=512)
@@ -928,14 +1301,27 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--checkpoint-dir", default="artifacts/e1/checkpoints")
     p.add_argument("--dev-fraction", type=float, default=0.05)
     p.add_argument("--tiny", action="store_true", help="CPU smoke test, no download")
+    p.add_argument(
+        "--deterministic",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="seed process RNGs and request deterministic kernels (default)",
+    )
     p.add_argument("--out", default=None)
-    args = p.parse_args(argv)
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_arg_parser().parse_args(argv)
+    tokens, warning = resolve_token_budget(args.arm, args.tokens)
+    if warning:
+        print(warning, file=sys.stderr, flush=True)
 
     cfg = TrainConfig(
         model_id=args.model,
         arm=args.arm,
         seed=args.seed,
-        tokens=args.tokens,
+        tokens=tokens,
         context=args.context,
         batch_size=args.batch_size,
         grad_accum=args.grad_accum,
@@ -956,6 +1342,7 @@ def main(argv: list[str] | None = None) -> int:
         dev_fraction=args.dev_fraction,
         checkpoint_every=args.checkpoint_every,
         checkpoint_dir=args.checkpoint_dir,
+        deterministic=args.deterministic,
     )
 
     print(
@@ -976,11 +1363,28 @@ def main(argv: list[str] | None = None) -> int:
         print(f"block fraction  : {ev['block_fraction']:.4f} of residual RMS")
     if val_nll is not None:
         print(f"val NLL         : {val_nll:.5f}")
+    extension = result["train"].get("extension") or {}
+    slope = extension.get("val_context_gain_slope_per_mtok")
+    if slope is None:
+        print("val cg slope    : unavailable (fewer than 2 dev points)")
+    else:
+        relation = (
+            "EXCEEDS"
+            if extension.get("exceeds_extension_threshold")
+            else "within"
+        )
+        print(
+            f"val cg slope    : {slope:+.6f} nats/token per 1M tokens "
+            f"({relation} 0.2 x MPID {extension['extension_threshold']:.6f}; "
+            "not applied)"
+        )
     print(f"checkpoint      : {record['final_checkpoint']}")
     print("manifest fields :")
     for name in (
         "run_id",
         "git_commit",
+        "git_dirty",
+        "git_diff_sha256",
         "config_sha256",
         "corpus_sha256",
         "spawn_keys",
@@ -991,6 +1395,7 @@ def main(argv: list[str] | None = None) -> int:
         "nan_skips",
         "arms",
         "notes",
+        "determinism",
     ):
         print(f"  {name}: {record[name]}")
     print("-" * 60)

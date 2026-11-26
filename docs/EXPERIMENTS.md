@@ -68,16 +68,23 @@ Four cells at *n* = 32 (pilot-set, floor 24, cap 64), shared-trunk design.
 | `e1/Bp/s*` | 32 | run | head (loss weight 0) | 30M |
 | `e1/E/s*` | 12 | run | block, permuted targets | 30M |
 | `e1/D/s*` | 6 | run | none (vehicle) | 30M |
-| `e1/N/s*` | 3 | run | none (frozen random block) | — |
+| `e1/N/s*` | 3 | run | none (frozen random block; does not train) | 0 |
 | `e1/PChi/s*`, `e1/PClo/s*` | 3 + 3 | run | LoRA, 2M tokens | 2M |
 | `e1/*/s*.joint` | 8 × 4 | run | trunk + block jointly | 30M |
 | `e1/A/s*.dose*` | 48 | run | block | 30M |
 
-**Total E1:** 219 training units. Every confirmatory training run is 30M tokens
-(`experiments.e1.arms.TOKENS_PER_RUN`, `docs/PROTOCOL.md` §5.6), including the
-dose rows. The GPU-hour totals in §7 and in PROTOCOL §11 were estimated under
-an earlier mix of 10M and 30M and are not re-derived here. Throughput the
-estimates used: 4,029 tok/s (bf16, ctx 512, micro-batch 4).
+**Total E1:** 219 training units. Confirmatory training runs are 30M tokens
+(`experiments.e1.arms.TOKENS_PER_RUN`, `docs/PROTOCOL.md` §5.6): A, B, A′, B′,
+E, D, the shared trunk and the joint confirmation. Positive-control arms are
+the 2M-token assay (`PC_TOKENS`), the same number in `all_arms()`. N does not
+train, so its budget is 0 here and in `all_arms()` — the old em dash and the
+old 1M were two spellings of a row the protocol does not give a training
+budget. The dose grid is not a factorial cell: it is absent from `all_arms()`
+and from the 219, and it is G6 only. `schedule_rows()` records its budget as
+`TOKENS_PER_RUN` so this table is not the only place that 30M lives. The
+GPU-hour totals in §7 and in PROTOCOL §11 were estimated under an earlier mix
+of 10M and 30M and are not re-derived here. Throughput the estimates used:
+4,029 tok/s (bf16, ctx 512, micro-batch 4).
 
 **Analysis.** Per-seed paired difference A − B, then mean across seeds. A′ − B′ the
 same. The joint-confirmation arm is analysed separately and never pooled with the

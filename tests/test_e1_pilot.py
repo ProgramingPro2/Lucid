@@ -12,7 +12,8 @@ import json
 
 import pytest
 
-from experiments.e1.pilot import summarise
+from experiments.e1.arms import all_arms
+from experiments.e1.pilot import build_arg_parser, summarise, train_command
 from experiments.protocol.stats import required_n
 
 
@@ -45,6 +46,27 @@ def test_summarise_floors_a_small_within_design_sd_at_24(tmp_path):
     # The uninflated, unfloored call under-sizes this SD. The report must not.
     assert required_n(row["sd"], 0.0112) == 1
     assert row["estimated_n_within_design"] == 24
+
+
+def test_pilot_cli_default_does_not_override_arm_budgets(tmp_path):
+    """Omitting --tokens leaves each arm on its own budget.
+
+    Passing one --tokens for the whole grid is the footgun that voided the
+    2026-11-20 pilot. The default command must not contain that flag.
+    """
+    parser = build_arg_parser()
+    args = parser.parse_args([])
+    assert args.tokens is None
+    for arm in all_arms():
+        cmd = train_command(arm.name, 0, args, tmp_path / f"{arm.name}.json")
+        assert "--tokens" not in cmd
+
+
+def test_pilot_token_override_is_forwarded(tmp_path):
+    parser = build_arg_parser()
+    args = parser.parse_args(["--tokens", "2000000"])
+    cmd = train_command("A", 0, args, tmp_path / "A.json")
+    assert cmd[cmd.index("--tokens") + 1] == "2000000"
 
 
 def test_summarise_caps_a_large_within_design_sd_at_64(tmp_path):

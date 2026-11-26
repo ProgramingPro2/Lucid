@@ -9,6 +9,7 @@ failed qualification must return VOID with reasons rather than a result.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import subprocess
@@ -22,9 +23,11 @@ import torch
 from torch import nn
 
 from experiments.protocol.manifest import (
+    DETERMINISM_FIELDS,
     REQUIRED_FIELDS,
     RunManifest,
     capture_git_commit,
+    capture_git_state,
     hash_config,
     partition_manifests,
     spawn_keys_for_seed,
@@ -63,6 +66,9 @@ def _good_manifest(**overrides) -> RunManifest:
         nan_skips=0,
         arms=["A", "B"],
         notes="pilot",
+        git_dirty=False,
+        git_diff_sha256="cd" * 32,
+        determinism={name: False for name in DETERMINISM_FIELDS},
     )
     base.update(overrides)
     return RunManifest(**base)
@@ -156,6 +162,45 @@ def test_partition_manifests_separates_good_from_bad():
         "e1/E/s17",
     ]
     assert all(reasons for _, reasons in excluded)
+
+
+def test_dirty_worktree_is_excluded_even_with_a_diff_hash():
+    """A hash of the diff does not contain the diff, so the run is excluded."""
+    manifest = _good_manifest(git_dirty=True)
+    problems = validate_completeness(manifest)
+    assert any("dirty" in problem for problem in problems)
+    included, excluded = partition_manifests([manifest])
+    assert included == []
+    assert excluded[0][0] is manifest
+
+
+def test_capture_git_state_on_a_clean_repo_hashes_the_empty_diff(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=repo, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=repo, check=True, capture_output=True,
+    )
+    (repo / "a.txt").write_text("hello\n", encoding="utf-8")
+    subprocess.run(["git", "add", "a.txt"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=repo, check=True, capture_output=True,
+    )
+    state = capture_git_state(repo)
+    assert state.dirty is False
+    assert len(state.commit) == 40
+    assert state.diff_sha256 == hashlib.sha256(b"").hexdigest()
+    (repo / "a.txt").write_text("hello\nworld\n", encoding="utf-8")
+    dirty = capture_git_state(repo)
+    assert dirty.dirty is True
+    assert dirty.diff_sha256 != state.diff_sha256
+    assert len(dirty.diff_sha256) == 64
 
 
 def test_capture_git_commit_never_raises(tmp_path):
