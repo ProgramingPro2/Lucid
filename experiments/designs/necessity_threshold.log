@@ -1,0 +1,3 @@
+closed_ce_prefix seed 0: ce 1.399 open_nec +9.914 closed_nll 1.422 closed_nec +10.085 closed_shuf +13.072 cos -0.018 frob 2.483 (10.2s)
+closed_ce_prefix seed 1: ce 1.421 open_nec +7.780 closed_nll 1.433 closed_nec +6.289 closed_shuf +16.527 cos -0.014 frob 2.309 (13.7s)
+closed_ce_prefix seed 2: ce 1.417 open_nec +9.189 closed_nll 1.427 closed_nec +9.291 closed_shuf +14.216 cos 0.035 frob 2.251 (15.8s)

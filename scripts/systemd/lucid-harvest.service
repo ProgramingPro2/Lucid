@@ -6,6 +6,9 @@ Documentation=file:///home/jpearce/Documents/Lucid/docs/CORPUS.md
 Type=simple
 WorkingDirectory=/home/jpearce/Documents/Lucid
 Environment=PYTHONUNBUFFERED=1
+# --cutoff 2025-06-01 is the operative harvest cutoff, not the window start.
+# The harvester opens on 2025-07-02 (the day after cutoff+30 days), which is
+# the first posting the date gate keeps. Do not change --cutoff to move it.
 ExecStart=/home/jpearce/Documents/Lucid/.venv/bin/python /home/jpearce/Documents/Lucid/scripts/harvest_supervisor.py --server biorxiv --cutoff 2025-06-01 --until 2026-11-25 --out artifacts/corpus/biorxiv_2026.jsonl --max-docs 1000000 --delay 4 --window-retries 3 --cooldown 120 --quiet-start 23:30 --quiet-end 06:00 --log artifacts/corpus/supervisor.log
 KillSignal=SIGTERM
 SendSIGKILL=no

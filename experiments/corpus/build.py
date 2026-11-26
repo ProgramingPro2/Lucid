@@ -20,11 +20,11 @@ from collections import Counter
 from datetime import date, timedelta
 from pathlib import Path
 
+from .nll import InvalidNLLScreen, apply_memorisation_screen, not_scored_record
 from .pipeline import (
     build_card,
     clean_text,
     deduplicate,
-    drop_low_nll,
     filter_by_date,
     filter_by_fulltext_status,
     filter_by_license,
@@ -33,6 +33,7 @@ from .pipeline import (
     split_documents,
     token_stream_sha256,
 )
+from .split import corpus_word_tokeniser as _word_tokeniser
 from .sources import (
     LICENSE_ALLOWLIST,
     PROGRAMME_BASE_MODEL,
@@ -109,12 +110,6 @@ def _synthetic_documents(cutoff: str, n: int = 60) -> list[Document]:
     return docs
 
 
-def _stub_nll(doc: Document) -> float:
-    """Deterministic pseudo-NLL in [0, 1) keyed on the document id."""
-    h = hashlib.sha256(doc.doc_id.encode()).digest()
-    return int.from_bytes(h[:8], "big") / 2**64
-
-
 def _g1c_verdict(
     kept: list,
     *,
@@ -153,15 +148,6 @@ def _g1c_verdict(
         "medRxiv document has fulltext status ok. "
         f"Dropped {n_bad} rows whose fulltext status was not ok."
     )
-
-
-def _word_tokeniser(text: str) -> list[int]:
-    """Stable integer tokenisation for hashing, without a model tokenizer."""
-    out: list[int] = []
-    for word in text.split():
-        digest = hashlib.sha1(word.encode("utf-8")).digest()
-        out.append(int.from_bytes(digest[:4], "big"))
-    return out
 
 
 def _acquire(source: str, cutoff: str, max_docs: int, fulltext: bool = False):
@@ -282,21 +268,21 @@ def build(
     deduped = deduplicate(sectioned, threshold=0.95)
     drops["near_duplicate"] += len(sectioned) - len(deduped)
 
+    # Real base-model NLL, or an explicit not-scored record. The threshold,
+    # the window, and the decile live in experiments.corpus.nll. A hash of
+    # the document id is not a score and does not drop anything.
     if nll_json:
         payload = json.loads(Path(nll_json).read_text())
-        # Accept both the scorer's envelope and a bare {doc_id: nll} table.
-        table = payload.get("nll", payload) if isinstance(payload, dict) else payload
-        missing = [d.doc_id for d in deduped if d.doc_id not in table]
-        if missing:
-            raise KeyError(
-                f"{len(missing)} harvested documents have no NLL score, e.g. "
-                f"{missing[0]}; rerun experiments.corpus.nll over this JSONL"
-            )
-        nll_fn = lambda d: float(table[d.doc_id])  # noqa: E731
+        screened = apply_memorisation_screen(deduped, payload)
+        kept = screened.kept
+        nll_record = screened.record
+        contamination_gap = screened.contamination_gap
+        drops["low_nll"] += screened.n_rejected
     else:
-        nll_fn = _stub_nll
-    kept, _ = drop_low_nll(deduped, nll_fn, quantile=0.10)
-    drops["low_nll"] += len(deduped) - len(kept)
+        kept = list(deduped)
+        nll_record = not_scored_record()
+        contamination_gap = "pending"
+        drops["low_nll"] += 0
 
     g1c_ok, g1c_verdict = _g1c_verdict(
         kept, allow_degraded=allow_degraded, status_counts=status_counts
@@ -376,7 +362,9 @@ def build(
             "base_model": PROGRAMME_BASE_MODEL,
             "documents_harvested": n_harvested,
             "token_stream_sha256": stream_hash,
-            "nll_decile": "stub" if not nll_json else str(nll_json),
+            "split_seed": seed,
+            "nll_decile": nll_record,
+            "contamination_gap_nats": contamination_gap,
             "sealed_test_key_holder": "pending",
             "g1c_compliant": g1c_ok,
             "g1c_verdict": g1c_verdict,
@@ -415,8 +403,12 @@ def build(
         "g1c_compliant": card["g1c_compliant"],
         "g1c_verdict": card["g1c_verdict"],
         "split_counts": card["split_counts"],
+        "split_counts_by_stratum": card["split_counts_by_stratum"],
+        "split_seed": card["split_seed"],
+        "split_assignment_rule": card["split_assignment_rule"],
         "tokens_per_stratum": dict(sorted(tokens_per_stratum.items())),
         "token_stream_sha256": stream_hash,
+        "token_stream_hash_rule": card["token_stream_hash_rule"],
         "card_sha256": hashlib.sha256(card_path.read_bytes()).hexdigest(),
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
@@ -455,7 +447,9 @@ def _print_report(result: dict) -> None:
     print("tokens per stratum:")
     for stratum, n in result["tokens_per_stratum"].items():
         print(f"  {stratum:16s} {n}")
+    print(f"split seed          : {card['split_seed']}")
     print(f"split counts        : {card['split_counts']}")
+    print(f"split by stratum    : {card['split_counts_by_stratum']}")
     print(f"token-stream sha256 : {card['token_stream_sha256']}")
     print("=" * 68)
 
@@ -525,6 +519,9 @@ def main(argv: list[str] | None = None) -> int:
         )
     except UnrecordedCutoff as exc:
         print(f"refusing: {exc}", file=sys.stderr)
+        return 2
+    except InvalidNLLScreen as exc:
+        print(str(exc), file=sys.stderr)
         return 2
     _print_report(result)
     print(f"wrote {Path(args.out) / 'card.json'} and manifest.json")

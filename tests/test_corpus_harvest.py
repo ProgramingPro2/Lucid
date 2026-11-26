@@ -951,3 +951,59 @@ def test_load_documents_skips_only_a_malformed_final_line(tmp_path):
     clean.write_text(first + "\n\n" + second + "\n", encoding="utf-8")
     docs = harvest_mod.load_documents(clean)
     assert [d.doc_id for d in docs] == ["biorxiv:10.1/a", "biorxiv:10.1/b"]
+
+
+def test_boundary_day_is_outside_the_fetch_set(tmp_path, monkeypatch):
+    """The date-gate boundary is not requested. The next day is.
+
+    cutoff 2025-06-01 plus 30 days is 2025-07-01, and the date gate keeps
+    postings strictly after that day. A document posted on 2025-07-01 used
+    to be fetched and then dropped. The window now opens on 2025-07-02.
+    """
+    from experiments.corpus.sources import cutoff_plus_grace
+
+    requested: list[tuple[str, str]] = []
+
+    class Recording(BioRxivClient):
+        def __init__(self, **kwargs):
+            kwargs["delay"] = 0.0
+            super().__init__(**kwargs)
+
+        def iter_metadata(self, since, until):
+            requested.append((since, until))
+            yield from ()
+
+    monkeypatch.setattr(harvest_mod, "BioRxivClient", Recording)
+    start = harvest_mod.harvest_window_start("2025-06-01")
+    assert start == cutoff_plus_grace("2025-06-01") + timedelta(days=1)
+    assert start.isoformat() == "2025-07-02"
+    # The proxy's first retained posting is unchanged: 2025-04-29 + 30 + 1.
+    assert harvest_mod.harvest_window_start("2025-04-29").isoformat() == "2025-05-30"
+
+    harvest_mod.harvest(
+        server="biorxiv",
+        since="2025-06-01",
+        until="2025-07-09",
+        out=tmp_path / "aligned.jsonl",
+        max_docs=10,
+        delay=0.0,
+        window_retries=1,
+    )
+    assert requested == [
+        ("2025-07-02", "2025-07-08"),
+        ("2025-07-09", "2025-07-09"),
+    ]
+    assert not any(lo <= "2025-07-01" <= hi for lo, hi in requested)
+    assert any(lo <= "2025-07-02" <= hi for lo, hi in requested)
+
+    requested.clear()
+    harvest_mod.harvest(
+        server="biorxiv",
+        since="2025-06-01",
+        until="2025-07-01",
+        out=tmp_path / "boundary_only.jsonl",
+        max_docs=10,
+        delay=0.0,
+        window_retries=1,
+    )
+    assert requested == []

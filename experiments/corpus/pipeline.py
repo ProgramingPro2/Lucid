@@ -12,13 +12,18 @@ expressed through this API.
 
 from __future__ import annotations
 
-import hashlib
-import random
 import re
-from collections import Counter, defaultdict
+from collections import Counter
 from datetime import date, timedelta
 
 from .sources import Document, normalise_license
+from .split import (
+    SPLIT_ASSIGNMENT_RULE,
+    TOKEN_STREAM_HASH_RULE,
+    counts_by_split_and_stratum,
+    split_documents,
+    token_stream_sha256,
+)
 
 # --------------------------------------------------------------------------
 # 1-2. date
@@ -283,86 +288,13 @@ def drop_low_nll(
 
 
 # --------------------------------------------------------------------------
-# 8. split by document
+# 8-9. split and token-stream hash
 # --------------------------------------------------------------------------
-
-
-def _stratum_rng(seed: int, stratum: str) -> random.Random:
-    digest = hashlib.sha256(f"{seed}:corpus:{stratum}".encode()).digest()
-    return random.Random(int.from_bytes(digest[:8], "big"))
-
-
-def split_documents(
-    docs: list[Document],
-    fractions: tuple[float, float, float] = (0.8, 0.1, 0.1),
-    seed: int = 0,
-    strata_key: str = "stratum",
-) -> dict[str, list[str]]:
-    """Stratified, document-level split returning document IDs.
-
-    Round-robin interleaving across strata makes every prefix of the order
-    stratum-balanced, and the final slice hits the target proportions exactly.
-    Document-level by construction: the only unit in the input is a document.
-    """
-    if abs(sum(fractions) - 1.0) > 1e-9:
-        raise ValueError("fractions must sum to 1")
-    groups: dict[str, list[str]] = defaultdict(list)
-    for doc in docs:
-        groups[document_stratum(doc, strata_key)].append(doc.doc_id)
-
-    per_stratum: list[list[str]] = []
-    for stratum in sorted(groups):
-        ids = sorted(groups[stratum])
-        _stratum_rng(seed, stratum).shuffle(ids)
-        per_stratum.append(ids)
-
-    order: list[str] = []
-    depth = 0
-    while True:
-        added = False
-        for ids in per_stratum:
-            if depth < len(ids):
-                order.append(ids[depth])
-                added = True
-        if not added:
-            break
-        depth += 1
-
-    n = len(order)
-    n_train = min(int(round(fractions[0] * n)), n)
-    n_dev = min(int(round(fractions[1] * n)), n - n_train)
-
-    splits = {
-        "train": order[:n_train],
-        "dev": order[n_train : n_train + n_dev],
-        "test": order[n_train + n_dev :],
-    }
-    all_ids = [i for v in splits.values() for i in v]
-    if len(all_ids) != len(set(all_ids)):
-        raise AssertionError("a document appeared in more than one split")
-    return splits
-
-
-# --------------------------------------------------------------------------
-# 9. freeze
-# --------------------------------------------------------------------------
-
-
-def token_stream_sha256(docs: list[Document], tokeniser) -> str:
-    """Hash the exact token stream in a fixed document order.
-
-    ``tokeniser`` maps text to a sequence of token ids. Sorting by ``doc_id``
-    means the hash does not depend on harvest order; including the id means a
-    document swapped for another changes the hash even if the tokens coincide.
-    """
-    h = hashlib.sha256()
-    for doc in sorted(docs, key=lambda d: d.doc_id):
-        tokens = tokeniser(doc.text)
-        h.update(doc.doc_id.encode("utf-8"))
-        h.update(b"\x00")
-        h.update(" ".join(str(t) for t in tokens).encode("utf-8"))
-        h.update(b"\x00")
-    return h.hexdigest()
+#
+# The implementations live in ``split.py``. They are imported above and
+# re-exported so existing callers keep this module's names. The split is a
+# per-document hash bucket (stable as the harvest grows), and the hash is
+# taken over documents sorted by doc_id.
 
 
 # --------------------------------------------------------------------------
@@ -382,7 +314,11 @@ CARD_KEYS: tuple[str, ...] = (
     "nll_decile",
     "contamination_gap_nats",
     "token_stream_sha256",
+    "token_stream_hash_rule",
     "split_counts",
+    "split_counts_by_stratum",
+    "split_seed",
+    "split_assignment_rule",
     "sealed_test_key_holder",
     "g1c_compliant",
     "g1c_verdict",
@@ -432,7 +368,15 @@ def build_card(
         "nll_decile": extra.get("nll_decile", "pending"),
         "contamination_gap_nats": extra.get("contamination_gap_nats", "pending"),
         "token_stream_sha256": extra.get("token_stream_sha256", "pending"),
+        "token_stream_hash_rule": extra.get(
+            "token_stream_hash_rule", TOKEN_STREAM_HASH_RULE
+        ),
         "split_counts": {k: len(v) for k, v in splits.items()},
+        "split_counts_by_stratum": counts_by_split_and_stratum(docs, splits),
+        "split_seed": extra.get("split_seed", None),
+        "split_assignment_rule": extra.get(
+            "split_assignment_rule", SPLIT_ASSIGNMENT_RULE
+        ),
         "sealed_test_key_holder": extra.get("sealed_test_key_holder", "pending"),
         "g1c_compliant": bool(extra.get("g1c_compliant", False)),
         "g1c_verdict": extra.get("g1c_verdict", "pending"),

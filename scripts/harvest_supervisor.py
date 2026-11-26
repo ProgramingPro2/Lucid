@@ -70,6 +70,8 @@ DEFAULT_QUIET_START = "23:30"
 DEFAULT_QUIET_END = "06:00"
 DEFAULT_OUT = "artifacts/corpus/biorxiv_2026.jsonl"
 DEFAULT_LOG = "artifacts/corpus/supervisor.log"
+# Operative harvest cutoff. Not the window start: with a 30-day grace the
+# harvester opens on 2025-07-02, the first day the date gate keeps.
 DEFAULT_CUTOFF = "2025-06-01"
 
 
@@ -570,7 +572,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cutoff",
         default=DEFAULT_CUTOFF,
-        help="ISO date or cutoff JSON, passed through to harvest",
+        help=(
+            "ISO date or cutoff JSON, passed through to harvest. "
+            "Windows open the day after this date plus 30 days, the first "
+            "day the date gate keeps (2025-06-01 opens on 2025-07-02). "
+            "Do not move this date to chase the window."
+        ),
     )
     parser.add_argument("--log", default=DEFAULT_LOG)
     parser.add_argument("--out", default=DEFAULT_OUT, help="harvest JSONL path")

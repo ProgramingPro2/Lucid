@@ -15,6 +15,10 @@ Usage:
     PYTHONPATH=src .venv/bin/python -m experiments.corpus.harvest \
         --server biorxiv --cutoff 2025-06-01 \
         --out artifacts/corpus/biorxiv.jsonl --max-docs 200 --resume
+
+Windows open on the day after cutoff + 30 days. ``--cutoff 2025-06-01``
+opens on 2025-07-02, the first posting the date gate keeps. The boundary
+day itself is not requested.
 """
 
 from __future__ import annotations
@@ -33,7 +37,7 @@ from .sources import (
     Document,
     HostRefused,
     backoff_seconds,
-    cutoff_plus_grace,
+    first_retained_posting,
     load_cutoff,
 )
 
@@ -60,6 +64,16 @@ def _windows(start: date, end: date, days: int):
         hi = min(lo + timedelta(days=days - 1), end)
         yield lo.isoformat(), hi.isoformat()
         lo = hi + timedelta(days=1)
+
+
+def harvest_window_start(since: str) -> date:
+    """First day the API is asked for.
+
+    The date gate keeps a posting only when it is strictly after cutoff +
+    grace. Opening on that boundary day downloads full text the build then
+    drops. The window opens on the next day, which is the first day kept.
+    """
+    return date.fromisoformat(first_retained_posting(since))
 
 
 def cursor_path_for(out: Path) -> Path:
@@ -157,7 +171,7 @@ def harvest(
 
     with out.open("a") as fh:
         for lo, hi in _windows(
-            cutoff_plus_grace(since), date.fromisoformat(until), window_days
+            harvest_window_start(since), date.fromisoformat(until), window_days
         ):
             if counts["written"] >= max_docs:
                 break

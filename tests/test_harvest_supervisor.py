@@ -296,3 +296,19 @@ def test_command_passes_resume_and_overrides(tmp_path):
     assert command[command.index("--cutoff") + 1] == "2025-06-01"
     assert command[command.index("--server") + 1] == "medrxiv"
     assert "--no-resume" not in command
+
+
+def test_cutoff_flag_stays_put_and_the_window_opens_a_day_later():
+    """The operative cutoff is still 2025-06-01. The window opens 2025-07-02."""
+    assert hs.DEFAULT_CUTOFF == "2025-06-01"
+    action = next(
+        item for item in hs.build_parser()._actions if "--cutoff" in item.option_strings
+    )
+    assert action.default == "2025-06-01"
+    assert "2025-07-02" in action.help
+    unit = (
+        Path(__file__).resolve().parents[1] / "scripts" / "systemd" / "lucid-harvest.service"
+    ).read_text()
+    assert "--cutoff 2025-06-01" in unit
+    assert "2025-07-02" in unit
+    assert "--cutoff 2025-06-02" not in unit

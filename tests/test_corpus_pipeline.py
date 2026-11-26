@@ -279,6 +279,11 @@ def test_full_dry_run_produces_documents_and_hash(tmp_path):
     )
     assert result["manifest"]["documents_retained"] >= 30
     assert re.fullmatch(r"[0-9a-f]{64}", result["manifest"]["token_stream_sha256"])
+    assert result["card"]["split_seed"] == 0
+    assert "hash-bucket" in result["card"]["split_assignment_rule"]
+    by_stratum = result["card"]["split_counts_by_stratum"]
+    for name, count in result["card"]["split_counts"].items():
+        assert sum(by_stratum[name].values()) == count
     assert (tmp_path / "card.json").exists()
     assert (tmp_path / "manifest.json").exists()
 
